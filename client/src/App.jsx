@@ -93,10 +93,24 @@ function AltLookup({ onResult }) {
           value={url}
           onChange={e=>{ setUrl(e.target.value); setError(""); setHint(""); setOk(false); }}
           onKeyDown={e=>e.key==="Enter"&&(e.preventDefault(),handleLookup())}
+          onPaste={e=>{ const t=(e.clipboardData||window.clipboardData)?.getData('text'); if(t){ e.preventDefault(); setUrl(t.trim()); setError(""); setHint(""); setOk(false); } }}
         />
         <button
           type="button"
-          onClick={async()=>{ try { const t=await navigator.clipboard.readText(); setUrl(t.trim()); setError(""); setHint(""); setOk(false); } catch{ setError("Clipboard access denied"); } }}
+          onClick={async(e)=>{
+            // Try Clipboard API first (works on https / desktop)
+            if (navigator.clipboard?.readText) {
+              try {
+                const t = await navigator.clipboard.readText();
+                setUrl(t.trim()); setError(""); setHint(""); setOk(false);
+                return;
+              } catch {}
+            }
+            // Mobile fallback: focus the input so native long-press → Paste works
+            e.currentTarget.previousSibling?.focus?.();
+            setError("Tap and hold the field → Paste");
+            setTimeout(()=>setError(""), 3000);
+          }}
           title="Paste from clipboard"
           style={{
             padding:"5px 10px",borderRadius:3,fontSize:11,cursor:"pointer",flexShrink:0,
@@ -372,7 +386,7 @@ function PricingFields({ data, onChange }) {
             placeholder="e.g. 75"
             style={{borderColor:"#f5a62333"}}/>
           <div style={{display:"flex",gap:4,marginTop:4}}>
-            {[70,75,80,85,90].map(p=>(
+            {[70,75,80,85,90,95,100].map(p=>(
               <span key={p} onClick={()=>handlePctChange(String(p))}
                 style={{cursor:"pointer",fontSize:9,padding:"2px 7px",borderRadius:3,userSelect:"none",
                   background: Math.abs(parseFloat(shownPct)-p)<0.1 ? "#f5a623" : "#1a1208",
@@ -1520,18 +1534,38 @@ export default function App() {
     if (!editTx) return;
     const cashIn     = toF(editTx.cashIn);
     const cashOut    = toF(editTx.cashOut);
+    const venmo      = toF(editTx.venmoAmount) || 0;
+    const zelle      = toF(editTx.zelleAmount) || 0;
     const updatedOut = editTx.cardsOut.map(c => ({...c, salePrice:toF(c.salePrice)}));
-    // Cost basis from inventory (cards going out — what we originally paid)
-    const costBasis  = updatedOut.reduce((s,c) => {
+
+    // Full cost basis: what we originally paid for cards going out
+    const costBasis = updatedOut.reduce((s,c) => {
       const inv = inventory.find(x => x.id === c.id);
       return s + (inv ? inv.buyPrice : (c.buyPrice||0));
     }, 0);
-    const mktIn      = (editTx.cardsIn||[]).reduce((s,c) => s+(toF(c.currentMarket)||toF(c.marketAtPurchase)||0), 0);
-    const marketProfit = (cashIn + mktIn) - (costBasis + cashOut);
+
+    // Market value of cards coming in (trade)
+    const mktIn = (editTx.cardsIn||[]).reduce((s,c) =>
+      s + (toF(c.currentMarket)||toF(c.marketAtPurchase)||0), 0);
+
+    // Total money in / out across all payment methods
+    const totalIn  = cashIn  + Math.max(0, venmo)  + Math.max(0, zelle);
+    const totalOut = cashOut + Math.max(0, -venmo) + Math.max(0, -zelle);
+
+    // marketProfit = (all cash in + trade-in market value) - (cost basis of cards out + all cash out)
+    const marketProfit = (totalIn + mktIn) - (costBasis + totalOut);
 
     await api(`/api/transactions/${editTx.id}`, { method:'PUT', body:{
-      date:editTx.date, notes:editTx.notes, cashIn, cashOut, marketProfit,
-      cardsOut:updatedOut, imageUrl:editTx.imageUrl || null,
+      date:        editTx.date,
+      notes:       editTx.notes,
+      cashIn,
+      cashOut,
+      marketProfit,
+      cardsOut:    updatedOut,
+      imageUrl:    editTx.imageUrl || null,
+      paymentMethod: editTx.paymentMethod || null,
+      venmoAmount: venmo || null,
+      zelleAmount: zelle || null,
     }});
     setEditTx(null);
     await reload();
@@ -3197,9 +3231,16 @@ export default function App() {
           </div>
           {(()=>{
             const ci=toF(editTx.cashIn), co=toF(editTx.cashOut);
-            const mktO=editTx.cardsOut.reduce((s,c)=>s+(toF(c.salePrice)||c.currentMarket||0),0);
+            const v=toF(editTx.venmoAmount)||0, z=toF(editTx.zelleAmount)||0;
+            const totalIn  = ci + Math.max(0,v) + Math.max(0,z);
+            const totalOut = co + Math.max(0,-v) + Math.max(0,-z);
+            const mktO = editTx.cardsOut.reduce((s,c)=>{
+              const inv=inventory.find(x=>x.id===c.id);
+              return s+(inv?inv.buyPrice:(c.buyPrice||0));
+            },0);
             const mktI=(editTx.cardsIn||[]).reduce((s,c)=>s+(toF(c.currentMarket)||toF(c.marketAtPurchase)||0),0);
-            const nc=ci-co, mp=(mktI+ci)-(mktO+co);
+            const nc=totalIn-totalOut;
+            const mp=(totalIn+mktI)-(mktO+totalOut);
             return <div style={{marginBottom:14,padding:10,background:"#0a0a0f",border:"1px solid #1a1a28",borderRadius:3,display:"flex",gap:20,flexWrap:"wrap",fontSize:12}}>
               <span style={{color:"#555"}}>Net Cash: <span style={{color:nc>=0?"#4ade80":"#f87171",fontWeight:700}}>{nc>=0?"+":"-"}{fmt(nc)}</span></span>
               <span style={{color:"#555"}}>Mkt Profit: <span className={mp>=0?"profit":"loss"} style={{fontWeight:700}}>{mp>=0?"+":"-"}{fmt(mp)}</span></span>
