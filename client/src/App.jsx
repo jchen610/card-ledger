@@ -3225,9 +3225,21 @@ export default function App() {
               ))}
             </div>
           )}
-          <div className="grid2" style={{marginBottom:14}}>
+          <div className="grid2" style={{marginBottom:8}}>
             <div><label style={{color:"#4ade80"}}>Cash Received ($)</label><input className="input" type="number" min="0" step="0.01" value={editTx.cashIn} onChange={e=>setEditTx(p=>({...p,cashIn:e.target.value}))}/></div>
             <div><label style={{color:"#f87171"}}>Cash Paid Out ($)</label><input className="input" type="number" min="0" step="0.01" value={editTx.cashOut} onChange={e=>setEditTx(p=>({...p,cashOut:e.target.value}))}/></div>
+          </div>
+          <div className="grid2" style={{marginBottom:14}}>
+            <div>
+              <label style={{color:"#60a5fa"}}>💙 Venmo Amount ($)</label>
+              <input className="input" type="number" step="0.01" value={editTx.venmoAmount||""} onChange={e=>setEditTx(p=>({...p,venmoAmount:e.target.value}))} placeholder="+ in / - out"/>
+              <div style={{fontSize:9,color:"#444",marginTop:3}}>Positive = received, negative = paid</div>
+            </div>
+            <div>
+              <label style={{color:"#c084fc"}}>💜 Zelle Amount ($)</label>
+              <input className="input" type="number" step="0.01" value={editTx.zelleAmount||""} onChange={e=>setEditTx(p=>({...p,zelleAmount:e.target.value}))} placeholder="+ in / - out"/>
+              <div style={{fontSize:9,color:"#444",marginTop:3}}>Positive = received, negative = paid</div>
+            </div>
           </div>
           {(()=>{
             const ci=toF(editTx.cashIn), co=toF(editTx.cashOut);
