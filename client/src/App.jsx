@@ -89,7 +89,7 @@ function AltLookup({ onResult }) {
         <input
           className="input"
           style={{flex:1,fontSize:11,borderColor: ok?"#4ade8044":error?"#f8717144":"#1e1e28"}}
-          placeholder="https://alt.app.link/... or https://alt.xyz/..."
+          placeholder="https://alt.app.link/... alt.xyz/... rarecandystore.com/..."
           value={url}
           onChange={e=>{ setUrl(e.target.value); setError(""); setHint(""); setOk(false); }}
           onKeyDown={e=>e.key==="Enter"&&(e.preventDefault(),handleLookup())}
@@ -145,7 +145,8 @@ function AltLookup({ onResult }) {
 // Supports: camera capture, file upload, or manual URL entry.
 // Uploads files to /api/upload and stores the returned server path.
 function ImagePicker({ value, onChange, label = "Photo (optional)" }) {
-  const fileRef   = useRef(null);
+  const fileRef    = useRef(null);
+  const galleryRef = useRef(null);
   const [uploading, setUploading] = useState(false);
   const [tab, setTab]             = useState("camera"); // "camera" | "url"
   const [urlDraft, setUrlDraft]   = useState(value || "");
@@ -213,21 +214,40 @@ function ImagePicker({ value, onChange, label = "Photo (optional)" }) {
             style={{ display: "none" }}
             onChange={handleFile}
           />
-          <button
-            type="button"
-            onClick={() => fileRef.current?.click()}
-            disabled={uploading}
-            style={{
-              width:"100%", padding:"10px", background:"#0c0c18",
-              border:"1px dashed #f5a62366", borderRadius:4, color: uploading ? "#555" : "#f5a623",
-              cursor: uploading ? "not-allowed" : "pointer",
-              fontFamily:"'Space Mono',monospace", fontSize:12, letterSpacing:1,
-            }}
-          >
-            {uploading ? "⏳ Uploading..." : "📷 Take Photo or Choose File"}
-          </button>
-          <div style={{fontSize:9,color:"#444",marginTop:4}}>
-            On mobile this opens your camera. On desktop it opens file picker.
+          <input
+            ref={galleryRef}
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={handleFile}
+          />
+          <div style={{display:"flex",gap:6,marginBottom:6}}>
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              disabled={uploading}
+              style={{
+                flex:1, padding:"10px", background:"#0c0c18",
+                border:"1px dashed #f5a62366", borderRadius:4, color: uploading ? "#555" : "#f5a623",
+                cursor: uploading ? "not-allowed" : "pointer",
+                fontFamily:"'Space Mono',monospace", fontSize:11, letterSpacing:1,
+              }}
+            >
+              {uploading ? "⏳ Uploading..." : "📷 Camera"}
+            </button>
+            <button
+              type="button"
+              onClick={() => galleryRef.current?.click()}
+              disabled={uploading}
+              style={{
+                flex:1, padding:"10px", background:"#0c0c18",
+                border:"1px dashed #4ade8033", borderRadius:4, color: uploading ? "#555" : "#4ade80",
+                cursor: uploading ? "not-allowed" : "pointer",
+                fontFamily:"'Space Mono',monospace", fontSize:11, letterSpacing:1,
+              }}
+            >
+              {uploading ? "⏳" : "🖼 Gallery"}
+            </button>
           </div>
         </div>
       )}
@@ -266,25 +286,54 @@ function ImagePicker({ value, onChange, label = "Photo (optional)" }) {
 // ─── Sub-components ───────────────────────────────────────────────────────────
 function GradeTag({ card, small }) {
   if (!card) return null;
+
+  // Extract numeric grade value for color tiering
+  function gradeColor(grade) {
+    const n = parseFloat((grade || '').replace(/[^0-9.]/g, '')) || 0;
+    if (n >= 10)  return { color:'#fde047', border:'#ca8a0466', bg:'#1a1500' }; // gold  — gem/pristine
+    if (n >= 9)   return { color:'#4ade80', border:'#16a34a55', bg:'#071208' }; // green — mint
+    if (n >= 8)   return { color:'#60a5fa', border:'#2563eb55', bg:'#060e1a' }; // blue  — near mint
+    if (n >= 7)   return { color:'#fb923c', border:'#c2410c55', bg:'#150800' }; // amber — good
+    return          { color:'#f87171', border:'#dc262655', bg:'#140505' };       // red   — played
+  }
+
+  // Company accent for the label prefix (subtle left border)
+  const companyAccent = {
+    PSA:'#a78bfa', BGS:'#60a5fa', CGC:'#facc15', SGC:'#4ade80', ACE:'#fb923c',
+  };
+
+  // Raw condition colors
+  const conditionColor = {
+    'Mint':          { color:'#fde047', bg:'#1a1500', border:'#ca8a0444' },
+    'Near Mint':     { color:'#4ade80', bg:'#071208', border:'#16a34a44' },
+    'Excellent':     { color:'#34d399', bg:'#061210', border:'#059b6444' },
+    'Good':          { color:'#60a5fa', bg:'#060e1a', border:'#2563eb44' },
+    'Light Played':  { color:'#fb923c', bg:'#150800', border:'#c2410c44' },
+    'Played':        { color:'#f87171', bg:'#140505', border:'#dc262644' },
+    'Poor':          { color:'#9ca3af', bg:'#0f0f0f', border:'#37415144' },
+  };
+
   if (card.isGraded && card.grade) {
-    const c = {
-      PSA:{bg:"#1c1030",color:"#a78bfa",border:"#7c3aed44"},
-      BGS:{bg:"#0d1f33",color:"#60a5fa",border:"#2563eb44"},
-      CGC:{bg:"#1a1a0a",color:"#facc15",border:"#ca8a0444"},
-      SGC:{bg:"#0d2010",color:"#4ade80",border:"#16a34a44"},
-      ACE:{bg:"#1a0d0d",color:"#fb923c",border:"#c2410c44"},
-    }[card.gradingCompany] || {bg:"#1c1030",color:"#a78bfa",border:"#7c3aed44"};
+    const gc = gradeColor(card.grade);
+    const ac = companyAccent[card.gradingCompany] || '#a78bfa';
     return (
-      <span style={{display:"inline-flex",alignItems:"center",background:c.bg,color:c.color,
-        border:`1px solid ${c.border}`,borderRadius:3,padding:small?"1px 6px":"2px 8px",
-        fontSize:small?9:10,fontWeight:700,whiteSpace:"nowrap"}}>
-        {card.grade}
+      <span style={{display:"inline-flex",alignItems:"center",gap:4,
+        background:gc.bg, border:`1px solid ${gc.border}`,
+        borderLeft:`3px solid ${ac}`,
+        borderRadius:3, padding:small?"1px 6px":"2px 8px",
+        fontSize:small?9:10, fontWeight:700, whiteSpace:"nowrap"}}>
+        <span style={{color:ac,fontSize:small?8:9,opacity:0.8}}>{card.gradingCompany}</span>
+        <span style={{color:gc.color}}>{card.grade.replace(card.gradingCompany+' ','')}</span>
       </span>
     );
   }
+
+  const cc = conditionColor[card.condition] || { color:'#666', bg:'#1a1a1a', border:'#2a2a2a44' };
   return (
-    <span style={{display:"inline-block",background:"#1a1a1a",color:"#666",border:"1px solid #2a2a2a",
-      borderRadius:3,padding:small?"1px 6px":"2px 8px",fontSize:small?9:10,fontWeight:700}}>
+    <span style={{display:"inline-block",
+      background:cc.bg, color:cc.color, border:`1px solid ${cc.border}`,
+      borderRadius:3, padding:small?"1px 6px":"2px 8px",
+      fontSize:small?9:10, fontWeight:700, whiteSpace:"nowrap"}}>
       RAW · {card.condition}
     </span>
   );
@@ -962,6 +1011,7 @@ export default function App() {
   const [transactions, setTransactions] = useState([]);
   const [profiles,     setProfiles]     = useState([]);
   const [equityDefaults, setEquityDefaults] = useState([]);
+  const [costs,        setCosts]        = useState([]);
   const [loading,      setLoading]      = useState(true);
   const [error,        setError]        = useState(null);
 
@@ -997,15 +1047,16 @@ export default function App() {
 
   async function reload() {
     try {
-      const [cards, txs, profs, eqDef, settings] = await Promise.all([
+      const [cards, txs, profs, eqDef, settings, costsData] = await Promise.all([
         api('/api/cards'), api('/api/transactions'), api('/api/profiles'),
-        api('/api/equity-defaults'), api('/api/settings'),
+        api('/api/equity-defaults'), api('/api/settings'), api('/api/costs'),
       ]);
       setInventory(cards);
       setTransactions(txs);
       setProfiles(profs);
       setEquityDefaults(eqDef.owners || []);
       if (settings.defaultNote !== undefined) setDefaultNote(settings.defaultNote || '');
+      setCosts(costsData);
     } catch(e) { setError(e.message); }
   }
 
@@ -1034,6 +1085,10 @@ export default function App() {
   const [soldPP,      setSoldPP]      = useState(50);
   const [txPage,      setTxPage]      = useState(0);
   const [txPP,        setTxPP]        = useState(20);
+
+  // ── Costs state ───────────────────────────────────────────────────────────────
+  const [costDraft,   setCostDraft]   = useState({ date: new Date().toISOString().split('T')[0], item:'', amount:'', notes:'' });
+  const [editCost,    setEditCost]    = useState(null);
   const [tempDN,      setTempDN]      = useState("");
 
   // Modals
@@ -1045,6 +1100,7 @@ export default function App() {
   const [editTx,        setEditTx]        = useState(null);
   const [editCard,      setEditCard]      = useState(null);
   const [editCardOwners, setEditCardOwners] = useState([]);
+  const [editSoldOwners, setEditSoldOwners] = useState([]);
   const [editSold,      setEditSold]      = useState(null);
   const [detailCard,    setDetailCard]    = useState(null);
   const [detailTx,      setDetailTx]      = useState(null);
@@ -1057,8 +1113,9 @@ export default function App() {
   const [addCardOwners,  setAddCardOwners]  = useState([]);
   const [addCardPayment, setAddCardPayment] = useState({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out" });
 
-  // Batch payment
-  const [batchPayment, setBatchPayment] = useState({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out" });
+  // Persist graded/raw preference across card adds
+  const [prefIsGraded, setPrefIsGraded] = useState(true);
+  const blankCard = () => ({ ...BLANK_CARD, isGraded: prefIsGraded });
 
   // Add card form
   const [newCard,       setNewCard]       = useState(BLANK_CARD);
@@ -1085,6 +1142,7 @@ export default function App() {
   const [newTradeCard, setNewTradeCard] = useState(BLANK_CARD);
   // Ownership for cards coming IN via trade (applied to each trade-in card)
   const [txInOwners,   setTxInOwners]   = useState([]);
+  const [newTradeCardQty, setNewTradeCardQty] = useState("1");
 
   // Batch purchase
   const [batchDate,          setBatchDate]          = useState(new Date().toISOString().split("T")[0]);
@@ -1248,7 +1306,7 @@ export default function App() {
       paymentMethod: pm.methods.join(',') || null,
       venmoAmount: venmoSigned, zelleAmount: zelleSigned,
     }});
-    setNewCard(BLANK_CARD);
+    setNewCard(blankCard());
     setAddCardDate(new Date().toISOString().split("T")[0]);
     setAddCardNotes("");
     setAddCardImage("");
@@ -1306,8 +1364,10 @@ export default function App() {
       currentMarket:    toF(editSold.currentMarket),
       status:           editSold.status,
       salePrice:        toF(editSold.salePrice),
+      owners:           editSoldOwners,
     }});
     setEditSold(null);
+    setEditSoldOwners([]);
     await reload();
   }
 
@@ -1324,7 +1384,7 @@ export default function App() {
       grade:            batchDraft.isGraded ? batchDraft.grade : null,
       condition:        batchDraft.isGraded ? null : batchDraft.condition,
     }]);
-    setBatchDraft(BLANK_CARD);
+    setBatchDraft(blankCard());
     setBatchDraftQty("1");
   }
 
@@ -1371,7 +1431,7 @@ export default function App() {
       paymentMethod: pm.methods.join(',') || null,
       venmoAmount: venmoSigned, zelleAmount: zelleSigned,
     }});
-    setBatchCards([]); setBatchDraft(BLANK_CARD); setBatchFinalPurchase(""); setBatchImage(""); setBatchOwners([]);
+    setBatchCards([]); setBatchDraft(blankCard()); setBatchFinalPurchase(""); setBatchImage(""); setBatchOwners([]);
     setBatchPayment({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out" });
     setShowBatch(false);
     await reload();
@@ -1399,7 +1459,8 @@ export default function App() {
     if (!newTradeCard.name.trim()) return;
     const mkt = newTradeCard.currentMarketTouched ? toF(newTradeCard.currentMarket) : toF(newTradeCard.marketAtPurchase);
     const agreedPrice = toF(newTradeCard.buyPrice) || mkt;
-    setTxCardsIn(prev => [...prev, {
+    const qty = Math.max(1, parseInt(newTradeCardQty || "1", 10) || 1);
+    const card = {
       ...newTradeCard,
       buyPrice:         toF(newTradeCard.buyPrice),
       marketAtPurchase: toF(newTradeCard.marketAtPurchase),
@@ -1409,8 +1470,11 @@ export default function App() {
       grade:            newTradeCard.isGraded ? newTradeCard.grade : null,
       condition:        newTradeCard.isGraded ? null : newTradeCard.condition,
       owners:           txInOwners,
-    }]);
-    setNewTradeCard(BLANK_CARD);
+    };
+    // Expand qty into multiple entries
+    setTxCardsIn(prev => [...prev, ...Array.from({length: qty}, () => ({...card}))]);
+    setNewTradeCard(blankCard());
+    setNewTradeCardQty("1");
   }
 
   async function handleRecordTransaction() {
@@ -1498,7 +1562,7 @@ export default function App() {
     }});
 
     setTxNotes(''); setTxCashAmt(''); setTxCashDir('in'); setTxImageUrl('');
-    setTxCardsOut([]); setTxCardsIn([]); setNewTradeCard(BLANK_CARD); setTxCardSearch('');
+    setTxCardsOut([]); setTxCardsIn([]); setNewTradeCard(blankCard()); setTxCardSearch('');
     setTxPaymentMethods(['cash']); setTxVenmoAmount(''); setTxZelleAmount('');
     setTxVenmoDir('in'); setTxZelleDir('in'); setTxFinalPrice(''); setTxInFinalPrice('');
     setShowAddTx(false);
@@ -1515,14 +1579,24 @@ export default function App() {
     setTxPaymentMethods(['cash']); setTxVenmoAmount(''); setTxZelleAmount('');
     setTxVenmoDir('in'); setTxZelleDir('in'); setTxFinalPrice(''); setTxInFinalPrice('');
     setTxCardsOut([]); setTxCardsIn([]);
-    setNewTradeCard(BLANK_CARD);
+    setNewTradeCard(blankCard());
+    setNewTradeCardQty("1");
     setTxInOwners(getDefaultOwners());
     setShowAddTx(true);
   }
 
+  function handleSetTxInOwners(newOwners) {
+    setTxInOwners(newOwners);
+    // Retroactively update ownership on all already-staged trade-in cards
+    setTxCardsIn(prev => prev.map(c => ({ ...c, owners: newOwners })));
+  }
+
   function openEditTx(tx) {
     setEditTx({
-      ...tx, cashIn:String(tx.cashIn), cashOut:String(tx.cashOut),
+      ...tx,
+      cashIn:  String(tx.cashIn),
+      cashOut: String(tx.cashOut),
+      cardsIn: tx.cardsIn || [],
       cardsOut: tx.cardsOut.map(c => ({...c,
         salePrice:     String(c.salePrice ?? ''),
         tradedAtPrice: String(c.salePrice ?? c.currentMarket ?? ''),
@@ -1562,6 +1636,7 @@ export default function App() {
       cashOut,
       marketProfit,
       cardsOut:    updatedOut,
+      cardsIn:     editTx.cardsIn || [],
       imageUrl:    editTx.imageUrl || null,
       paymentMethod: editTx.paymentMethod || null,
       venmoAmount: venmo || null,
@@ -1637,7 +1712,7 @@ export default function App() {
         * { box-sizing:border-box; }
         body{margin:0;background:#0a0a0f;overflow-x:hidden}
         ::-webkit-scrollbar{width:6px} ::-webkit-scrollbar-track{background:#111} ::-webkit-scrollbar-thumb{background:#f5a623;border-radius:3px}
-        .nav-btn{background:none;border:none;color:#555;font-family:'Space Mono',monospace;font-size:11px;letter-spacing:2px;text-transform:uppercase;cursor:pointer;padding:10px 16px;transition:all 0.2s;border-bottom:2px solid transparent;white-space:nowrap}
+        .nav-btn{background:none;border:none;color:#555;font-family:'Space Mono',monospace;font-size:9px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;padding:10px 8px;transition:all 0.2s;border-bottom:2px solid transparent;white-space:nowrap}
         .nav-btn.active{color:#f5a623;border-bottom:2px solid #f5a623}
         .nav-btn:hover:not(.active){color:#aaa}
         .btn{border:none;border-radius:3px;cursor:pointer;font-family:'Space Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:8px 14px;transition:all 0.2s;white-space:nowrap}
@@ -1700,15 +1775,15 @@ export default function App() {
             <span className="hero-icon" style={{fontSize:20}}>⚡</span>
             <span className="hero-logo" style={{fontFamily:"'Black Han Sans',sans-serif",fontSize:17,letterSpacing:3,color:"#f5a623"}}>CARDLEDGER</span>
           </div>
-          <nav style={{display:"flex",overflowX:"auto"}}>
-            {[{k:"in_stock",l:`Stock (${inStockCards.length})`},{k:"sold",l:`Sold (${soldCards.length})`},{k:"transactions",l:"Transactions"},{k:"stats",l:"Analytics"}].map(v => (
+          <nav style={{display:"flex",overflowX:"auto",flex:1,minWidth:0}}>
+            {[{k:"in_stock",l:`Stock (${inStockCards.length})`},{k:"sold",l:`Sold (${soldCards.length})`},{k:"transactions",l:"Txns"},{k:"stats",l:"Analytics"},{k:"costs",l:"Costs"}].map(v => (
               <button key={v.k} className={`nav-btn ${view===v.k?"active":""}`} onClick={() => setView(v.k)}>{v.l}</button>
             ))}
-            <button className="nav-btn" onClick={() => setShowProfiles(true)} style={{marginLeft:"auto",color:"#f5a623"}}>
-              👥 {profiles.length ? `${profiles.length} Partner${profiles.length>1?"s":""}` : "Partners"}
+            <button className="nav-btn" onClick={() => setShowProfiles(true)} style={{marginLeft:"auto",color:"#f5a623",flexShrink:0}}>
+              👥 {profiles.length ? `${profiles.length}` : ""}Partners
             </button>
           </nav>
-          <div className="hide-sm" style={{display:"flex",gap:6,flexShrink:0,alignItems:"center"}}>
+          <div className="hide-sm" style={{display:"flex",gap:4,flexShrink:0,alignItems:"center"}}>
             <a href="/api/export/inventory.csv" download><button className="btn btn-export btn-sm" title="Download Inventory CSV">📦 Inv</button></a>
             <a href="/api/export/transactions.csv" download><button className="btn btn-export btn-sm" title="Download Transactions CSV">🧾 Tx</button></a>
             <button
@@ -2087,7 +2162,7 @@ export default function App() {
                             </td>
                             <td>{sp!=null?<span className={`pct-pill ${salePillCls(sp)}`}>{pct(sp)}</span>:"—"}</td>
                             <td>{p!=null?<span className={p>=0?"profit":"loss"} style={{fontWeight:700}}>{p>=0?"+":"-"}{fmt(Math.abs(p))}</span>:"—"}</td>
-                            <td><button className="edit-btn" onClick={() => setEditSold({...card,buyPrice:String(card.buyPrice),marketAtPurchase:String(card.marketAtPurchase),currentMarket:String(card.currentMarket),salePrice:String(card.salePrice??'')})}>✎</button></td>
+                            <td><button className="edit-btn" onClick={() => { setEditSold({...card,buyPrice:String(card.buyPrice),marketAtPurchase:String(card.marketAtPurchase),currentMarket:String(card.currentMarket),salePrice:String(card.salePrice??'')}); setEditSoldOwners(card.owners||[]); }}>✎</button></td>
                           </tr>
                         );
                       })}
@@ -2562,6 +2637,133 @@ export default function App() {
             })()}
           </div>
         )}
+
+        {/* ═══ COSTS ═══ */}
+        {view === "costs" && (()=>{
+          const totalSpend = costs.reduce((s,c)=>s+c.amount,0);
+          const BLANK_COST = { date: new Date().toISOString().split('T')[0], item:'', amount:'', notes:'' };
+
+          async function handleAddCost() {
+            if (!costDraft.item.trim() || !costDraft.amount) return;
+            await api('/api/costs', { method:'POST', body:{ ...costDraft, amount: parseFloat(costDraft.amount)||0 }});
+            setCostDraft(BLANK_COST);
+            await reload();
+          }
+
+          async function handleSaveCost() {
+            if (!editCost) return;
+            await api(`/api/costs/${editCost.id}`, { method:'PUT', body:{ ...editCost, amount: parseFloat(editCost.amount)||0 }});
+            setEditCost(null);
+            await reload();
+          }
+
+          async function handleDeleteCost(id) {
+            if (!window.confirm('Delete this cost entry?')) return;
+            await api(`/api/costs/${id}`, { method:'DELETE' });
+            await reload();
+          }
+
+          return (
+            <div>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
+                <h2 className="section-title">EXPENSES</h2>
+                <div style={{fontSize:12,color:"#555"}}>
+                  Total: <span style={{color:"#f87171",fontWeight:700}}>{fmt(totalSpend)}</span>
+                  <span style={{fontSize:10,color:"#333",marginLeft:8}}>· {costs.length} entries</span>
+                </div>
+              </div>
+
+              {/* Add entry form */}
+              <div className="panel" style={{marginBottom:14,padding:14}}>
+                <div style={{fontSize:9,color:"#f5a623",letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>Log Expense</div>
+                <div className="grid2" style={{marginBottom:8}}>
+                  <div>
+                    <label>Date</label>
+                    <input className="input" type="date" value={costDraft.date} onChange={e=>setCostDraft(p=>({...p,date:e.target.value}))}/>
+                  </div>
+                  <div>
+                    <label>Amount ($)</label>
+                    <input className="input" type="number" min="0" step="0.01" placeholder="0.00"
+                      value={costDraft.amount} onChange={e=>setCostDraft(p=>({...p,amount:e.target.value}))}/>
+                  </div>
+                </div>
+                <div style={{marginBottom:8}}>
+                  <label>Item / Description</label>
+                  <input className="input" placeholder="e.g. Penny sleeves, Top loaders, Convention entry..."
+                    value={costDraft.item} onChange={e=>setCostDraft(p=>({...p,item:e.target.value}))}
+                    onKeyDown={e=>e.key==='Enter'&&(e.preventDefault(),handleAddCost())}/>
+                </div>
+                <div style={{marginBottom:12}}>
+                  <label>Notes (optional)</label>
+                  <input className="input" placeholder="Any extra detail..."
+                    value={costDraft.notes} onChange={e=>setCostDraft(p=>({...p,notes:e.target.value}))}
+                    onKeyDown={e=>e.key==='Enter'&&(e.preventDefault(),handleAddCost())}/>
+                </div>
+                <button className="btn btn-primary" style={{width:"100%"}}
+                  onClick={handleAddCost}
+                  disabled={!costDraft.item.trim()||!costDraft.amount}>
+                  + Log Expense
+                </button>
+              </div>
+
+              {/* Edit inline modal */}
+              {editCost && (
+                <div style={{position:"fixed",inset:0,background:"#000a",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+                  <div style={{background:"#0e0e18",border:"1px solid #252535",borderRadius:6,padding:20,width:"100%",maxWidth:420}}>
+                    <div style={{fontSize:11,letterSpacing:2,color:"#f5a623",marginBottom:14,textTransform:"uppercase"}}>Edit Expense</div>
+                    <div className="grid2" style={{marginBottom:8}}>
+                      <div><label>Date</label><input className="input" type="date" value={editCost.date} onChange={e=>setEditCost(p=>({...p,date:e.target.value}))}/></div>
+                      <div><label>Amount ($)</label><input className="input" type="number" min="0" step="0.01" value={editCost.amount} onChange={e=>setEditCost(p=>({...p,amount:e.target.value}))}/></div>
+                    </div>
+                    <div style={{marginBottom:8}}><label>Item</label><input className="input" value={editCost.item} onChange={e=>setEditCost(p=>({...p,item:e.target.value}))}/></div>
+                    <div style={{marginBottom:14}}><label>Notes</label><input className="input" value={editCost.notes||""} onChange={e=>setEditCost(p=>({...p,notes:e.target.value}))}/></div>
+                    <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                      <button className="btn btn-ghost" onClick={()=>setEditCost(null)}>Cancel</button>
+                      <button className="btn btn-primary" onClick={handleSaveCost}>Save</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Costs log */}
+              {costs.length === 0 ? (
+                <div className="empty">No expenses logged yet. Add your first one above.</div>
+              ) : (
+                <div className="panel" style={{overflowX:"auto"}}>
+                  <table>
+                    <thead><tr>
+                      <th>Date</th><th>Item</th><th>Amount</th><th className="hide-sm">Notes</th><th></th>
+                    </tr></thead>
+                    <tbody>
+                      {costs.map(c=>(
+                        <tr key={c.id}>
+                          <td style={{color:"#555",whiteSpace:"nowrap"}}>{c.date}</td>
+                          <td style={{fontWeight:600,color:"#e8e4d9"}}>{c.item}</td>
+                          <td style={{color:"#f87171",fontWeight:700,whiteSpace:"nowrap"}}>{fmt(c.amount)}</td>
+                          <td className="hide-sm" style={{color:"#555",fontSize:11}}>{c.notes||"—"}</td>
+                          <td>
+                            <div style={{display:"flex",gap:4}}>
+                              <button className="edit-btn" onClick={()=>setEditCost({...c,amount:String(c.amount)})}>✎</button>
+                              <button className="edit-btn" style={{borderColor:"#7f1d1d44",color:"#b91c1c"}} onClick={()=>handleDeleteCost(c.id)}>🗑</button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr>
+                        <td colSpan={2} style={{color:"#555"}}>{costs.length} entries</td>
+                        <td style={{color:"#f87171",fontWeight:700}}>{fmt(totalSpend)}</td>
+                        <td className="hide-sm"/><td/>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
       </div>
 
       {/* ═══ ADD CARD MODAL ═══ */}
@@ -2585,7 +2787,7 @@ export default function App() {
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
                 <label style={{margin:0}}>Card Name</label>
                 {(newCard.name||newCard.buyPrice||newCard.marketAtPurchase)&&(
-                  <button type="button" onClick={()=>setNewCard(BLANK_CARD)}
+                  <button type="button" onClick={()=>setNewCard(blankCard())}
                     style={{padding:"2px 8px",borderRadius:3,fontSize:10,cursor:"pointer",
                       background:"transparent",color:"#555",border:"1px solid #252535",
                       fontFamily:"'Space Mono',monospace"}}>
@@ -2597,7 +2799,7 @@ export default function App() {
             </div>
             {/* 3. Grade + Pricing */}
             <div style={{marginBottom:14,padding:14,background:"#0c0c18",borderRadius:4,border:"1px solid #1a1a2e"}}>
-              <GradeFields data={newCard} onChange={setNewCard}/>
+              <GradeFields data={newCard} onChange={d=>{if(d.isGraded!==newCard.isGraded)setPrefIsGraded(d.isGraded);setNewCard(d);}}/>
             </div>
             <div style={{marginBottom:14}}><PricingFields data={newCard} onChange={setNewCard}/></div>
             {/* 4. Summary pill */}
@@ -2653,7 +2855,7 @@ export default function App() {
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
               <div style={{fontSize:9,color:"#f5a623",letterSpacing:1.5,textTransform:"uppercase"}}>Add Card to Batch</div>
               {(batchDraft.name||batchDraft.buyPrice||batchDraft.marketAtPurchase)&&(
-                <button type="button" onClick={()=>{ setBatchDraft(BLANK_CARD); setBatchDraftQty("1"); }}
+                <button type="button" onClick={()=>{ setBatchDraft(blankCard()); setBatchDraftQty("1"); }}
                   style={{padding:"2px 8px",borderRadius:3,fontSize:10,cursor:"pointer",
                     background:"transparent",color:"#555",border:"1px solid #252535",
                     fontFamily:"'Space Mono',monospace",whiteSpace:"nowrap"}}>
@@ -2672,7 +2874,7 @@ export default function App() {
               </div>
               <div><label>Qty</label><input className="input" type="number" min="1" step="1" value={batchDraftQty} onChange={e=>setBatchDraftQty(e.target.value)}/></div>
             </div>
-            <div style={{marginBottom:10}}><GradeFields data={batchDraft} onChange={setBatchDraft}/></div>
+            <div style={{marginBottom:10}}><GradeFields data={batchDraft} onChange={d=>{if(d.isGraded!==batchDraft.isGraded)setPrefIsGraded(d.isGraded);setBatchDraft(d);}}/></div>
             <div style={{marginBottom:10}}><PricingFields data={batchDraft} onChange={setBatchDraft}/></div>
             <button className="btn btn-ghost" style={{width:"100%"}} onClick={handleStageBatchCard}>+ Stage Card</button>
           </div>
@@ -2925,7 +3127,7 @@ export default function App() {
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
                   <span style={{fontSize:9,color:"#4ade80",letterSpacing:1.5,textTransform:"uppercase"}}>Add Card</span>
                   {(newTradeCard.name||newTradeCard.buyPrice||newTradeCard.marketAtPurchase)&&(
-                    <button type="button" onClick={()=>setNewTradeCard(BLANK_CARD)}
+                    <button type="button" onClick={()=>setNewTradeCard(blankCard())}
                       style={{padding:"2px 8px",borderRadius:3,fontSize:10,cursor:"pointer",
                         background:"transparent",color:"#555",border:"1px solid #252535",
                         fontFamily:"'Space Mono',monospace",whiteSpace:"nowrap"}}>
@@ -2934,14 +3136,18 @@ export default function App() {
                   )}
                 </div>
                 <AltLookup onResult={r=>setNewTradeCard(p=>({...p,name:r.cardName}))}/>
-                <div style={{marginBottom:8}}>
-                  <input className="input" style={{width:"100%"}} placeholder="Card name" value={newTradeCard.name} onChange={e=>setNewTradeCard(p=>({...p,name:e.target.value}))}/>
+                <div style={{display:"flex",gap:8,marginBottom:8}}>
+                  <input className="input" style={{flex:1}} placeholder="Card name" value={newTradeCard.name} onChange={e=>setNewTradeCard(p=>({...p,name:e.target.value}))}/>
+                  <div style={{flexShrink:0,width:70}}>
+                    <label style={{fontSize:9,color:"#555",letterSpacing:1,textTransform:"uppercase"}}>Qty</label>
+                    <input className="input" type="number" min="1" step="1" value={newTradeCardQty} onChange={e=>setNewTradeCardQty(e.target.value)}/>
+                  </div>
                 </div>
-                <div style={{marginBottom:10}}><GradeFields data={newTradeCard} onChange={setNewTradeCard}/></div>
+                <div style={{marginBottom:10}}><GradeFields data={newTradeCard} onChange={d=>{if(d.isGraded!==newTradeCard.isGraded)setPrefIsGraded(d.isGraded);setNewTradeCard(d);}}/></div>
                 <div style={{marginBottom:8}}><PricingFields data={newTradeCard} onChange={setNewTradeCard}/></div>
                 <button className="btn btn-ghost" style={{width:"100%"}} onClick={handleAddTradeCard}>+ Add Card to Trade</button>
               </div>
-              <OwnershipSplit profiles={profiles} owners={txInOwners} onChange={setTxInOwners}/>
+              <OwnershipSplit profiles={profiles} owners={txInOwners} onChange={handleSetTxInOwners}/>
             </div>
           )}
 
@@ -3213,14 +3419,35 @@ export default function App() {
             <div style={{marginBottom:14}}>
               <label style={{color:"#f87171",marginBottom:8}}>Cards Out — {editTx.type==="trade"?"Traded At":"Sold At"} Prices</label>
               {editTx.cardsOut.map((co,i)=>(
-                <div key={i} style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,padding:"8px 12px",background:"#0c0c18",border:"1px solid #1e1e28",borderRadius:3}}>
-                  <span style={{flex:1,fontSize:12,color:"#ccc"}}>{co.name}{co.grade&&<span style={{fontSize:10,color:"#a78bfa",marginLeft:6}}>{co.grade}</span>}<span style={{fontSize:10,color:"#555",marginLeft:6}}>mkt {fmt(co.currentMarket||0)}</span></span>
-                  <div style={{display:"flex",alignItems:"center",gap:6}}>
-                    <label style={{margin:0,whiteSpace:"nowrap",fontSize:9}}>{editTx.type==="trade"?"Traded at":"Sold at"} ($)</label>
-                    <input className="input" type="number" min="0" step="0.01" style={{width:100,padding:"4px 8px",fontSize:11}}
-                      value={co.salePrice??""} onChange={e=>setEditTx(p=>({...p,cardsOut:p.cardsOut.map((c,j)=>j===i?{...c,salePrice:e.target.value}:c)}))}/>
-                    {co.salePrice&&toF(co.salePrice)>0&&co.currentMarket>0&&(()=>{const sp=(toF(co.salePrice)/co.currentMarket)*100;return<span className={`pct-pill ${salePillCls(sp)}`}>{pct(sp)}</span>;})()}
+                <div key={i} style={{marginBottom:8,padding:"8px 12px",background:"#0c0c18",border:"1px solid #1e1e28",borderRadius:3}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:co.owners?.length>0?8:0}}>
+                    <span style={{flex:1,fontSize:12,color:"#ccc"}}>{co.name}{co.grade&&<span style={{fontSize:10,color:"#a78bfa",marginLeft:6}}>{co.grade}</span>}<span style={{fontSize:10,color:"#555",marginLeft:6}}>mkt {fmt(co.currentMarket||0)}</span></span>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                      <label style={{margin:0,whiteSpace:"nowrap",fontSize:9}}>{editTx.type==="trade"?"Traded at":"Sold at"} ($)</label>
+                      <input className="input" type="number" min="0" step="0.01" style={{width:100,padding:"4px 8px",fontSize:11}}
+                        value={co.salePrice??""} onChange={e=>setEditTx(p=>({...p,cardsOut:p.cardsOut.map((c,j)=>j===i?{...c,salePrice:e.target.value}:c)}))}/>
+                      {co.salePrice&&toF(co.salePrice)>0&&co.currentMarket>0&&(()=>{const sp=(toF(co.salePrice)/co.currentMarket)*100;return<span className={`pct-pill ${salePillCls(sp)}`}>{pct(sp)}</span>;})()}
+                    </div>
                   </div>
+                  <OwnershipSplit profiles={profiles}
+                    owners={co.owners||[]}
+                    onChange={owners=>setEditTx(p=>({...p,cardsOut:p.cardsOut.map((c,j)=>j===i?{...c,owners}:c)}))}/>
+                </div>
+              ))}
+            </div>
+          )}
+          {editTx.cardsIn?.length>0&&(
+            <div style={{marginBottom:14}}>
+              <label style={{color:"#4ade80",marginBottom:8}}>Cards In — Ownership</label>
+              {editTx.cardsIn.map((ci,i)=>(
+                <div key={i} style={{marginBottom:8,padding:"8px 12px",background:"#0a1208",border:"1px solid #14532d33",borderRadius:3}}>
+                  <div style={{fontSize:12,color:"#4ade80",marginBottom:8,fontWeight:600}}>
+                    {ci.name}{ci.grade&&<span style={{fontSize:10,color:"#a78bfa",marginLeft:6}}>{ci.grade}</span>}
+                    {!ci.cardId&&<span style={{fontSize:9,color:"#555",marginLeft:8}}>(card may have been sold/traded)</span>}
+                  </div>
+                  <OwnershipSplit profiles={profiles}
+                    owners={ci.owners||[]}
+                    onChange={owners=>setEditTx(p=>({...p,cardsIn:p.cardsIn.map((c,j)=>j===i?{...c,owners}:c)}))}/>
                 </div>
               ))}
             </div>
@@ -3281,7 +3508,7 @@ export default function App() {
 
       {/* ═══ EDIT SOLD CARD MODAL ═══ */}
       {editSold&&(
-        <ModalShell title="EDIT SOLD CARD" onClose={()=>setEditSold(null)}>
+        <ModalShell title="EDIT SOLD CARD" onClose={()=>{ setEditSold(null); setEditSoldOwners([]); }}>
           <div style={{marginBottom:14}}><label>Card Name</label><input className="input" value={editSold.name} onChange={e=>setEditSold(p=>({...p,name:e.target.value}))}/></div>
           <div style={{marginBottom:14,padding:14,background:"#0c0c18",borderRadius:4,border:"1px solid #1a1a2e"}}><GradeFields data={editSold} onChange={setEditSold}/></div>
           <div className="grid3" style={{marginBottom:14}}>
@@ -3290,8 +3517,9 @@ export default function App() {
             <div><label>Mkt @ Sale ($)</label><input className="input" type="number" min="0" step="0.01" value={editSold.currentMarket} onChange={e=>setEditSold(p=>({...p,currentMarket:e.target.value}))}/></div>
           </div>
           <div style={{marginBottom:14}}><label>Sale Price ($)</label><input className="input" type="number" min="0" step="0.01" value={editSold.salePrice} onChange={e=>setEditSold(p=>({...p,salePrice:e.target.value}))}/></div>
-          <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-            <button className="btn btn-ghost" onClick={()=>setEditSold(null)}>Cancel</button>
+          <OwnershipSplit profiles={profiles} owners={editSoldOwners} onChange={setEditSoldOwners}/>
+          <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
+            <button className="btn btn-ghost" onClick={()=>{ setEditSold(null); setEditSoldOwners([]); }}>Cancel</button>
             <button className="btn btn-primary" onClick={handleSaveSold}>Save Changes</button>
           </div>
         </ModalShell>

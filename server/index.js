@@ -385,6 +385,18 @@ db.exec(`
   );
 `);
 
+// ── Costs / misc expenses ──────────────────────────────────────────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS costs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    date        TEXT    NOT NULL,
+    item        TEXT    NOT NULL,
+    amount      REAL    NOT NULL DEFAULT 0,
+    notes       TEXT,
+    created_at  TEXT    DEFAULT (datetime('now'))
+  );
+`);
+
 app.use(cors());
 app.use(express.json());
 
@@ -597,6 +609,7 @@ app.put('/api/cards/:id', (req, res) => {
     c.condition || null, c.buyPrice, c.marketAtPurchase, c.currentMarket,
     c.status, c.salePrice ?? null, req.params.id
   );
+  if (c.owners) saveOwnership(Number(req.params.id), c.owners);
   res.json({ ok: true });
 });
 
@@ -630,12 +643,25 @@ app.get('/api/transactions', (req, res) => {
         initials: o.initials, percentage: o.percentage,
       })) : [],
     })),
-    cardsIn: ins.filter(r => r.transaction_id === t.id).map(r => ({
-      name: r.name, isGraded: r.is_graded === 1,
-      gradingCompany: r.grading_company, grade: r.grade,
-      condition: r.condition_val, buyPrice: r.buy_price,
-      marketAtPurchase: r.market_at_purchase, currentMarket: r.current_market,
-    })),
+    cardsIn: ins.filter(r => r.transaction_id === t.id).map(r => {
+      // Find the inventory card that came in via this transaction (regardless of current status)
+      const card = db.prepare(
+        `SELECT id FROM cards WHERE transaction_id=? AND lower(name)=lower(?) LIMIT 1`
+      ).get(t.id, r.name);
+      const cardId = card ? card.id : null;
+      const cardOwners = cardId ? ownership.filter(o => o.card_id === cardId).map(o => ({
+        profileId: o.profile_id, name: o.name, color: o.color,
+        initials: o.initials, percentage: o.percentage,
+      })) : [];
+      return {
+        cardId, // include the actual inventory card ID
+        name: r.name, isGraded: r.is_graded === 1,
+        gradingCompany: r.grading_company, grade: r.grade,
+        condition: r.condition_val, buyPrice: r.buy_price,
+        marketAtPurchase: r.market_at_purchase, currentMarket: r.current_market,
+        owners: cardOwners,
+      };
+    }),
   })));
 });
 
@@ -707,6 +733,16 @@ app.put('/api/transactions/:id', (req, res) => {
       db.prepare('UPDATE tx_cards_out SET sale_price=? WHERE transaction_id=? AND card_id=?')
         .run(co.salePrice, id, co.id);
       db.prepare('UPDATE cards SET sale_price=? WHERE id=?').run(co.salePrice, co.id);
+      // Update ownership for cards that went out (they stay in card_profiles even after sale)
+      if (co.owners && co.id) saveOwnership(co.id, co.owners);
+    }
+
+    // Update ownership for cards that came in via trade/buy
+    if (t.cardsIn && t.cardsIn.length) {
+      for (const ci of t.cardsIn) {
+        const cardId = ci.cardId || ci._cardId;
+        if (cardId && ci.owners && ci.owners.length) saveOwnership(cardId, ci.owners);
+      }
     }
   })();
 
@@ -897,6 +933,30 @@ app.get('/api/backup/download/uploads', (req, res) => {
   res.download(uploadsZipPath, 'uploads-backup.zip');
 });
 
+// ── Costs endpoints ────────────────────────────────────────────────────────────
+app.get('/api/costs', (req, res) => {
+  res.json(db.prepare('SELECT * FROM costs ORDER BY date DESC, id DESC').all());
+});
+
+app.post('/api/costs', (req, res) => {
+  const { date, item, amount, notes } = req.body;
+  const info = db.prepare('INSERT INTO costs (date, item, amount, notes) VALUES (?, ?, ?, ?)')
+    .run(date, item, amount || 0, notes || null);
+  res.json({ id: info.lastInsertRowid });
+});
+
+app.put('/api/costs/:id', (req, res) => {
+  const { date, item, amount, notes } = req.body;
+  db.prepare('UPDATE costs SET date=?, item=?, amount=?, notes=? WHERE id=?')
+    .run(date, item, amount || 0, notes || null, req.params.id);
+  res.json({ ok: true });
+});
+
+app.delete('/api/costs/:id', (req, res) => {
+  db.prepare('DELETE FROM costs WHERE id=?').run(req.params.id);
+  res.json({ ok: true });
+});
+
 // ── Alt.xyz link lookup ────────────────────────────────────────────────────────
 const https = require('https');
 const http  = require('http');
@@ -907,8 +967,45 @@ app.get('/api/alt-test', (req, res) => {
 
 app.get('/api/alt-lookup', (req, res) => {
   const { url } = req.query;
-  console.log('[alt-lookup] received request, url:', url ? url.slice(0,60) : 'MISSING');
+  console.log('[alt-lookup] received request, url:', url ? url.slice(0,80) : 'MISSING');
   if (!url) return res.status(400).json({ error: 'No URL provided' });
+
+  // ── Rare Candy: parse card name directly from URL path ────────────────────
+  // URL pattern: /pokemon/sets/<set-name>/<card-slug>/<id>
+  // e.g. /pokemon/sets/double-blaze/wigglytuff-63/FUYYrM7...
+  if (url.includes('rarecandy.com')) {
+    try {
+      const pathParts = url.replace(/\?.*$/, '').split('/').filter(Boolean);
+      // Find "sets" in path, card slug is two positions after
+      const setsIdx = pathParts.indexOf('sets');
+      if (setsIdx !== -1 && pathParts.length > setsIdx + 2) {
+        const setSlug  = pathParts[setsIdx + 1]; // e.g. "double-blaze"
+        const cardSlug = pathParts[setsIdx + 2]; // e.g. "wigglytuff-63"
+
+        // Convert slugs: "wigglytuff-63" → "Wigglytuff 63"
+        function slugToTitle(s) {
+          return s.split('-').map((w,i) => {
+            // Keep numbers as-is, capitalize words
+            if (/^\d+$/.test(w)) return w;
+            return w.charAt(0).toUpperCase() + w.slice(1);
+          }).join(' ');
+        }
+
+        const cardName = slugToTitle(cardSlug);
+        const setName  = slugToTitle(setSlug);
+
+        console.log(`[alt-lookup] Rare Candy path parse → "${cardName}" / "${setName}"`);
+        return res.json({
+          cardName: `${cardName} ${setName}`,
+          description: `${cardName} from ${setName}`,
+          imageUrl: '',
+          sourceUrl: url,
+        });
+      }
+    } catch(e) {
+      console.warn('[alt-lookup] Rare Candy path parse failed:', e.message);
+    }
+  }
 
   function get(targetUrl, redirects) {
     if (redirects <= 0) return Promise.reject(new Error('Too many redirects'));
@@ -954,8 +1051,9 @@ app.get('/api/alt-lookup', (req, res) => {
       const imgUrl  = meta('property','og:image')        || meta('name','twitter:image')       || '';
 
       const cardName = title
-        .replace(/\s*[·•|–—]\s*(Alt|alt\.xyz|Marketplace|Shop).*$/i, '')
+        .replace(/\s*[·•|–—]\s*(Alt|alt\.xyz|Marketplace|Shop|Rare\s*Candy|rarecandystore\.com|Rare Candy Store).*$/i, '')
         .replace(/\s*\|.*$/, '')
+        .replace(/\s*-\s*Rare\s*Candy.*$/i, '')
         .trim();
 
       if (!cardName) {
