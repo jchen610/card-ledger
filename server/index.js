@@ -353,6 +353,8 @@ try { db.exec(`ALTER TABLE transactions ADD COLUMN payment_method TEXT`); } catc
 try { db.exec(`ALTER TABLE transactions ADD COLUMN venmo_amount REAL`); } catch(e) {}
 try { db.exec(`ALTER TABLE transactions ADD COLUMN zelle_amount REAL`); } catch(e) {}
 try { db.exec(`ALTER TABLE cards ADD COLUMN image_url TEXT`); } catch(e) {}
+try { db.exec(`ALTER TABLE transactions ADD COLUMN binder_amount REAL`); } catch(e) {}
+try { db.exec(`ALTER TABLE transactions ADD COLUMN binder_credit_used INTEGER DEFAULT 0`); } catch(e) {}
 
 // Profiles / equity support
 db.exec(`
@@ -394,6 +396,33 @@ db.exec(`
     amount      REAL    NOT NULL DEFAULT 0,
     notes       TEXT,
     created_at  TEXT    DEFAULT (datetime('now'))
+  );
+`);
+
+// ── Binder (RareCandy scraper sync) ────────────────────────────────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS binder_inventory (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_name     TEXT NOT NULL,
+    set_name      TEXT,
+    set_number    TEXT,
+    rarity        TEXT,
+    unit_price    REAL    DEFAULT 0,
+    quantity      INTEGER DEFAULT 1,
+    first_seen_at TEXT    DEFAULT (datetime('now')),
+    last_seen_at  TEXT    DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS binder_imports (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    imported_at     TEXT DEFAULT (datetime('now')),
+    cards_added     INTEGER DEFAULT 0,
+    cards_removed   INTEGER DEFAULT 0,
+    qty_increased   INTEGER DEFAULT 0,
+    qty_decreased   INTEGER DEFAULT 0,
+    cards_unchanged INTEGER DEFAULT 0,
+    cost_basis      REAL,
+    sale_proceeds   REAL,
+    notes           TEXT
   );
 `);
 
@@ -632,6 +661,8 @@ app.get('/api/transactions', (req, res) => {
     paymentMethod: t.payment_method || null,
     venmoAmount: t.venmo_amount || null,
     zelleAmount: t.zelle_amount || null,
+    binderAmount: t.binder_amount || null,
+    binderCreditUsed: t.binder_credit_used === 1,
     imageUrl: (imgs.find(i => i.transaction_id === t.id) || {}).url || null,
     cardsOut: outs.filter(r => r.transaction_id === t.id).map(r => ({
       id: r.card_id, name: r.name, grade: r.grade,
@@ -670,9 +701,9 @@ app.post('/api/transactions', (req, res) => {
 
   const run = db.transaction(() => {
     const txId = db.prepare(`
-      INSERT INTO transactions (type, date, cash_in, cash_out, notes, market_profit, payment_method, venmo_amount, zelle_amount)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(t.type, t.date, t.cashIn, t.cashOut, t.notes || null, t.marketProfit, t.paymentMethod || null, t.venmoAmount || null, t.zelleAmount || null).lastInsertRowid;
+      INSERT INTO transactions (type, date, cash_in, cash_out, notes, market_profit, payment_method, venmo_amount, zelle_amount, binder_amount)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(t.type, t.date, t.cashIn, t.cashOut, t.notes || null, t.marketProfit, t.paymentMethod || null, t.venmoAmount || null, t.zelleAmount || null, t.binderAmount || null).lastInsertRowid;
 
     if (t.imageUrl) {
       db.prepare('INSERT INTO tx_images (transaction_id, url) VALUES (?, ?)')
@@ -720,8 +751,8 @@ app.put('/api/transactions/:id', (req, res) => {
 
   db.transaction(() => {
     db.prepare(`
-      UPDATE transactions SET date=?, notes=?, cash_in=?, cash_out=?, market_profit=?, payment_method=?, venmo_amount=?, zelle_amount=? WHERE id=?
-    `).run(t.date, t.notes || null, t.cashIn, t.cashOut, t.marketProfit, t.paymentMethod || null, t.venmoAmount || null, t.zelleAmount || null, id);
+      UPDATE transactions SET date=?, notes=?, cash_in=?, cash_out=?, market_profit=?, payment_method=?, venmo_amount=?, zelle_amount=?, binder_amount=? WHERE id=?
+    `).run(t.date, t.notes || null, t.cashIn, t.cashOut, t.marketProfit, t.paymentMethod || null, t.venmoAmount || null, t.zelleAmount || null, t.binderAmount || null, id);
 
     db.prepare('DELETE FROM tx_images WHERE transaction_id = ?').run(id);
     if (t.imageUrl) {
@@ -1072,6 +1103,264 @@ app.get('/api/alt-lookup', (req, res) => {
       console.error('[alt-lookup]', err.message);
       res.status(500).json({ error: err.message });
     });
+});
+
+// ── Binder helpers ─────────────────────────────────────────────────────────────
+function parseCSVRow(line) {
+  const result = [];
+  let inQuote = false;
+  let current = '';
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      if (inQuote && line[i + 1] === '"') { current += '"'; i++; }
+      else { inQuote = !inQuote; }
+    } else if (c === ',' && !inQuote) {
+      result.push(current.trim());
+      current = '';
+    } else {
+      current += c;
+    }
+  }
+  result.push(current.trim());
+  return result;
+}
+
+function parseBinderCSV(csvText) {
+  const lines = csvText.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return [];
+  const headers = parseCSVRow(lines[0]);
+  const cards = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVRow(lines[i]);
+    if (cols.length < 2) continue;
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = (cols[idx] || '').replace(/^"|"$/g, ''); });
+    const qty = parseInt(row['Quantity'] || row['quantity'] || '1', 10) || 1;
+    const rawPrice = parseFloat(row['Price'] || row['price'] || '0') || 0;
+    const unitPrice = qty > 1 ? rawPrice / qty : rawPrice;
+    const cardName = row['CardName'] || row['cardname'] || row['card_name'] || '';
+    if (!cardName) continue;
+    cards.push({
+      card_name:  cardName,
+      set_name:   row['Set']    || row['set_name']   || '',
+      set_number: row['Number'] || row['set_number'] || '',
+      rarity:     row['Rarity'] || row['rarity']     || '',
+      unit_price: unitPrice,
+      quantity:   qty,
+    });
+  }
+  return cards;
+}
+
+function binderKey(c) { return `${c.card_name}|${c.set_number}`; }
+
+function computeBinderDiff(newCards) {
+  const current = db.prepare('SELECT * FROM binder_inventory').all();
+  const currentMap = new Map(current.map(c => [binderKey(c), c]));
+  const newMap     = new Map(newCards.map(c => [binderKey(c), c]));
+
+  const added       = [];  // completely new card type
+  const removed     = [];  // completely gone card type
+  const qtyUp       = [];  // qty increased → delta cards added
+  const qtyDown     = [];  // qty decreased → delta cards removed
+  const unchanged   = [];
+
+  for (const [key, card] of newMap.entries()) {
+    const existing = currentMap.get(key);
+    if (!existing) {
+      added.push(card);
+    } else if (card.quantity > existing.quantity) {
+      qtyUp.push({ ...card, prevQuantity: existing.quantity, delta: card.quantity - existing.quantity, existingId: existing.id });
+    } else if (card.quantity < existing.quantity) {
+      qtyDown.push({ ...card, prevQuantity: existing.quantity, delta: existing.quantity - card.quantity, existingId: existing.id });
+    } else {
+      unchanged.push({ ...card, existingId: existing.id });
+    }
+  }
+  for (const [key, card] of currentMap.entries()) {
+    if (!newMap.has(key)) removed.push(card);
+  }
+
+  return { added, removed, qtyUp, qtyDown, unchanged };
+}
+
+// GET /api/binder/inventory
+app.get('/api/binder/inventory', (req, res) => {
+  const cards   = db.prepare('SELECT * FROM binder_inventory ORDER BY card_name').all();
+  const imports = db.prepare('SELECT * FROM binder_imports ORDER BY imported_at DESC LIMIT 30').all();
+  res.json({ cards, imports });
+});
+
+// POST /api/binder/preview  — parse CSV, return diff (no DB writes)
+app.post('/api/binder/preview', (req, res) => {
+  try {
+    const csvText = typeof req.body === 'string' ? req.body : (req.body && req.body.csvText);
+    if (!csvText) return res.status(400).json({ error: 'No CSV text provided' });
+    const newCards = parseBinderCSV(csvText);
+    const diff = computeBinderDiff(newCards);
+    const totalNewValue = diff.added.reduce((s, c) => s + c.unit_price * c.quantity, 0)
+      + diff.qtyUp.reduce((s, c) => s + c.unit_price * c.delta, 0);
+    const totalRemovedValue = diff.removed.reduce((s, c) => s + c.unit_price * c.quantity, 0)
+      + diff.qtyDown.reduce((s, c) => s + c.unit_price * c.delta, 0);
+    // Unsettled binder credit — separate in (received) and out (paid) totals
+    const binderIn  = db.prepare(`SELECT COALESCE(SUM(binder_amount), 0) as total FROM transactions WHERE binder_credit_used=0 AND binder_amount > 0`).get().total || 0;
+    const binderOut = db.prepare(`SELECT COALESCE(SUM(binder_amount), 0) as total FROM transactions WHERE binder_credit_used=0 AND binder_amount < 0`).get().total || 0;
+    const binderCredit = binderIn + binderOut; // net (out is negative)
+    res.json({ ...diff, totalNewValue, totalRemovedValue, totalParsed: newCards.length, binderCredit, binderIn, binderOut: Math.abs(binderOut) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/binder/import  — apply diff, optionally create ledger transactions
+app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
+  try {
+    const { csvText, costBasis, binderCredit, saleProceeds, saleBinder, notes, date, owners } = req.body;
+    const newCards = parseBinderCSV(csvText);
+    const { added, removed, qtyUp, qtyDown, unchanged } = computeBinderDiff(newCards);
+    const txDate = date || new Date().toISOString().split('T')[0];
+    const now = new Date().toISOString();
+
+    // All "effective new" cards (new type + qty increase delta)
+    const effectiveAdded = [
+      ...added,
+      ...qtyUp.map(c => ({ ...c, quantity: c.delta })),
+    ];
+    // All "effective removed" cards
+    const effectiveRemoved = [
+      ...removed,
+      ...qtyDown.map(c => ({ ...c, quantity: c.delta })),
+    ];
+
+    db.transaction(() => {
+      // ── Update binder_inventory ──────────────────────────────────────────────
+      for (const card of added) {
+        db.prepare(`INSERT INTO binder_inventory (card_name, set_name, set_number, rarity, unit_price, quantity, first_seen_at, last_seen_at)
+                    VALUES (?,?,?,?,?,?,?,?)`)
+          .run(card.card_name, card.set_name, card.set_number, card.rarity, card.unit_price, card.quantity, now, now);
+      }
+      for (const card of [...qtyUp, ...qtyDown, ...unchanged]) {
+        db.prepare('UPDATE binder_inventory SET unit_price=?, quantity=?, last_seen_at=? WHERE id=?')
+          .run(card.unit_price, card.quantity, now, card.existingId);
+      }
+      for (const card of removed) {
+        db.prepare('DELETE FROM binder_inventory WHERE id=?').run(card.id);
+      }
+
+      // ── Settle binder credit balance ─────────────────────────────────────────
+      const appliedBinderCredit = parseFloat(req.body.binderCredit) || 0;
+      const appliedSaleBinder   = parseFloat(saleBinder) || 0;
+      if (appliedBinderCredit !== 0 || appliedSaleBinder !== 0) {
+        db.prepare(`UPDATE transactions SET binder_credit_used=1 WHERE binder_credit_used=0 AND binder_amount IS NOT NULL AND binder_amount != 0`).run();
+      }
+
+      // ── Create BUY transaction for new cards ────────────────────────────────
+      const totalBasis = (parseFloat(costBasis) || 0) + appliedBinderCredit;
+      if (totalBasis > 0 && effectiveAdded.length > 0) {
+        const basis = totalBasis;
+        const totalNewValue = effectiveAdded.reduce((s, c) => s + c.unit_price * c.quantity, 0);
+
+        const cashPortion   = parseFloat(costBasis) || 0;
+        const txId = db.prepare(
+          `INSERT INTO transactions (type, date, cash_in, cash_out, notes, market_profit, payment_method)
+           VALUES (?,?,?,?,?,?,?)`
+        ).run('buy', txDate, 0, cashPortion,
+          notes || `Binder import: ${effectiveAdded.length} new card type(s)` + (appliedBinderCredit ? ` (+${appliedBinderCredit.toFixed(2)} binder credit)` : ''), 0,
+          cashPortion > 0 ? 'cash' : 'binder'
+        ).lastInsertRowid;
+
+        for (const card of effectiveAdded) {
+          const proportion   = totalNewValue > 0 ? (card.unit_price * card.quantity) / totalNewValue : 1 / effectiveAdded.length;
+          const lotCost      = basis * proportion;
+          const unitCost     = card.quantity > 0 ? lotCost / card.quantity : lotCost;
+
+          for (let q = 0; q < card.quantity; q++) {
+            const cardId = db.prepare(
+              `INSERT INTO cards (name, condition_val, buy_price, market_at_purchase, current_market, status, transaction_id)
+               VALUES (?,?,?,?,?,?,?)`
+            ).run(card.card_name, 'Near Mint', unitCost, card.unit_price, card.unit_price, 'in_stock', txId).lastInsertRowid;
+
+            if (owners && owners.length > 0) {
+              for (const o of owners) {
+                db.prepare('INSERT OR REPLACE INTO card_profiles (card_id, profile_id, percentage) VALUES (?,?,?)')
+                  .run(cardId, o.profileId, o.percentage);
+              }
+            }
+          }
+
+          db.prepare(
+            `INSERT INTO tx_cards_in (transaction_id, name, condition_val, buy_price, market_at_purchase, current_market)
+             VALUES (?,?,?,?,?,?)`
+          ).run(txId, `${card.card_name}${card.quantity > 1 ? ` ×${card.quantity}` : ''}`,
+            'Near Mint', unitCost, card.unit_price, card.unit_price);
+        }
+      }
+
+      // ── Create SALE transaction for removed cards ──────────────────────────
+      const cashProceeds   = parseFloat(saleProceeds) || 0;
+      const binderProceeds = parseFloat(saleBinder)   || 0;
+      const totalSaleProceeds = cashProceeds + binderProceeds;
+      if (totalSaleProceeds > 0 && effectiveRemoved.length > 0) {
+        const proceeds = totalSaleProceeds;
+        const totalRemovedValue = effectiveRemoved.reduce((s, c) => s + c.unit_price * c.quantity, 0);
+        const pmMethods = [cashProceeds > 0 ? 'cash' : null, binderProceeds > 0 ? 'binder' : null].filter(Boolean).join(',') || 'cash';
+
+        const txId = db.prepare(
+          `INSERT INTO transactions (type, date, cash_in, cash_out, notes, payment_method, binder_amount)
+           VALUES (?,?,?,?,?,?,?)`
+        ).run('sale', txDate, cashProceeds, 0,
+          notes || `Binder removal: ${effectiveRemoved.length} card type(s)`, pmMethods,
+          binderProceeds > 0 ? binderProceeds : null
+        ).lastInsertRowid;
+
+        for (const card of effectiveRemoved) {
+          const proportion     = totalRemovedValue > 0 ? (card.unit_price * card.quantity) / totalRemovedValue : 1 / effectiveRemoved.length;
+          const cardSaleTotal  = proceeds * proportion;
+          const unitSalePrice  = card.quantity > 0 ? cardSaleTotal / card.quantity : cardSaleTotal;
+
+          const matchingCards = db.prepare(
+            `SELECT id, buy_price FROM cards WHERE name=? AND status='in_stock' LIMIT ?`
+          ).all(card.card_name, card.quantity);
+
+          for (const mc of matchingCards) {
+            db.prepare(`UPDATE cards SET status='sold', sale_price=?, transaction_id=? WHERE id=?`)
+              .run(unitSalePrice, txId, mc.id);
+            if (owners && owners.length > 0) {
+              for (const o of owners) {
+                db.prepare('INSERT OR REPLACE INTO card_profiles (card_id, profile_id, percentage) VALUES (?,?,?)')
+                  .run(mc.id, o.profileId, o.percentage);
+              }
+            }
+            db.prepare(`INSERT INTO tx_cards_out (transaction_id, card_id, name, current_market, sale_price)
+                        VALUES (?,?,?,?,?)`)
+              .run(txId, mc.id, card.card_name, card.unit_price, unitSalePrice);
+          }
+
+          // If fewer in-stock than we expect, log ghost entries for the remainder
+          const matched = matchingCards.length;
+          const remaining = card.quantity - matched;
+          for (let r = 0; r < remaining; r++) {
+            db.prepare(`INSERT INTO tx_cards_out (transaction_id, card_id, name, current_market, sale_price)
+                        VALUES (?,?,?,?,?)`)
+              .run(txId, null, card.card_name, card.unit_price, unitSalePrice);
+          }
+        }
+      }
+
+      // ── Record import history ───────────────────────────────────────────────
+      db.prepare(
+        `INSERT INTO binder_imports (imported_at, cards_added, cards_removed, qty_increased, qty_decreased, cards_unchanged, cost_basis, sale_proceeds, notes)
+         VALUES (?,?,?,?,?,?,?,?,?)`
+      ).run(now, added.length, removed.length, qtyUp.length, qtyDown.length, unchanged.length,
+        totalBasis > 0 ? totalBasis : null, saleProceeds || null, notes || null);
+    })();
+
+    res.json({ ok: true, added: added.length + qtyUp.length, removed: removed.length + qtyDown.length });
+  } catch (e) {
+    console.error('[binder-import]', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.listen(PORT, '0.0.0.0', () => {

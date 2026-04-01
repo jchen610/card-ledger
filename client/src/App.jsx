@@ -484,7 +484,7 @@ function ModalShell({ title, onClose, children, wide }) {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 // ── Buy payment method UI (used in Add Card + Batch Buy) ──────────────────────
-function BuyPaymentUI({ payment, onChange, buyPrice }) {
+function BuyPaymentUI({ payment, onChange, buyPrice, allowBinder }) {
   const toggle = m => {
     onChange({ ...payment, methods: payment.methods.includes(m)
       ? payment.methods.filter(x=>x!==m)
@@ -493,10 +493,10 @@ function BuyPaymentUI({ payment, onChange, buyPrice }) {
   const set = k => v => onChange({ ...payment, [k]: v });
 
   const methods  = payment.methods;
-  const amtKey   = { cash:"cashAmt", venmo:"venmoAmt", zelle:"zelleAmt" };
-  const dirKey   = { cash:"cashDir", venmo:"venmoDir", zelle:"zelleDir" };
-  const color    = { cash:"#4ade80", venmo:"#60a5fa", zelle:"#c084fc" };
-  const icon     = { cash:"💵", venmo:"💙", zelle:"💜" };
+  const amtKey   = { cash:"cashAmt", venmo:"venmoAmt", zelle:"zelleAmt", binder:"binderAmt" };
+  const dirKey   = { cash:"cashDir", venmo:"venmoDir", zelle:"zelleDir", binder:"binderDir" };
+  const color    = { cash:"#4ade80", venmo:"#60a5fa", zelle:"#c084fc", binder:"#f5a623" };
+  const icon     = { cash:"💵", venmo:"💙", zelle:"💜", binder:"📖" };
 
   // Compute how much is already accounted for by filled fields
   const filledTotal = methods.reduce((s, m) => {
@@ -515,7 +515,7 @@ function BuyPaymentUI({ payment, onChange, buyPrice }) {
 
       {/* Method toggle buttons */}
       <div style={{display:"flex",gap:6,marginBottom:methods.length?8:0,flexWrap:"wrap"}}>
-        {[["cash","💵 Cash"],["venmo","💙 Venmo"],["zelle","💜 Zelle"]].map(([m,label])=>(
+        {[["cash","💵 Cash"],["venmo","💙 Venmo"],["zelle","💜 Zelle"],...(allowBinder?[["binder","📖 Binder"]]:[])] .map(([m,label])=>(
           <button key={m} type="button" onClick={()=>toggle(m)}
             style={{padding:"4px 12px",borderRadius:3,fontSize:11,cursor:"pointer",fontFamily:"'Space Mono',monospace",
               background:methods.includes(m)?color[m]+"22":"transparent",
@@ -609,26 +609,59 @@ function OwnershipSplit({ profiles, owners, onChange }) {
   const total = owners.reduce((s, o) => s + (parseFloat(o.percentage) || 0), 0);
   const totalOk = Math.abs(total - 100) < 0.1;
 
+  // Check if a profile is "checked" — has > 0 percentage
+  const isChecked = p => {
+    const o = owners.find(x => x.profileId === p.id);
+    return o && o.percentage > 0;
+  };
+
+  // Toggle a profile's checkbox — redistribute evenly among all checked profiles
+  const toggleCheck = p => {
+    const wasChecked = isChecked(p);
+    // Build new checked set
+    const checkedIds = active
+      .filter(pr => pr.id === p.id ? !wasChecked : isChecked(pr))
+      .map(pr => pr.id);
+    // If none checked, restore default even split across all
+    if (checkedIds.length === 0) {
+      onChange(defaultOwners(active));
+      return;
+    }
+    const each = parseFloat((100 / checkedIds.length).toFixed(2));
+    const updated = active.map((pr, i) => {
+      const inSplit = checkedIds.includes(pr.id);
+      const isLast = inSplit && pr.id === checkedIds[checkedIds.length - 1];
+      return {
+        profileId: pr.id, name: pr.name, color: pr.color, initials: pr.initials,
+        percentage: inSplit
+          ? (isLast ? parseFloat((100 - each * (checkedIds.length - 1)).toFixed(2)) : each)
+          : 0,
+      };
+    });
+    onChange(updated.filter(o => o.percentage > 0));
+  };
+
   return (
     <div style={{marginTop:10,padding:10,background:"#0a0a14",border:"1px solid #1e1e30",borderRadius:4}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
         <div style={{fontSize:9,letterSpacing:2,color:"#555",textTransform:"uppercase"}}>Ownership Split</div>
-        <button type="button" className="btn btn-ghost btn-sm" style={{fontSize:10,padding:"2px 8px"}}
-          onClick={() => onChange(defaultOwners(active))}>Even Split</button>
       </div>
       {active.map(p => {
         const o = owners.find(x => x.profileId === p.id);
         const percentage = o ? o.percentage : 0;
+        const checked = percentage > 0;
         return (
           <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-            <div style={{width:6,height:6,borderRadius:"50%",background:p.color,flexShrink:0}}/>
-            <span style={{fontSize:11,color:"#aaa",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+            <input type="checkbox" checked={checked} onChange={() => toggleCheck(p)}
+              style={{accentColor:p.color,cursor:"pointer",flexShrink:0}} />
+            <div style={{width:6,height:6,borderRadius:"50%",background:p.color,flexShrink:0,opacity:checked?1:0.3}}/>
+            <span style={{fontSize:11,color:checked?"#aaa":"#444",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
               {p.name}
             </span>
             <div style={{display:"flex",alignItems:"center",gap:4}}>
               <input type="number" min="0" max="100" step="0.5"
-                style={{width:64,background:"#0e0e18",border:`1px solid ${p.color}44`,borderRadius:3,
-                  color:"#e8e4d9",padding:"2px 6px",fontSize:12,textAlign:"right"}}
+                style={{width:64,background:"#0e0e18",border:`1px solid ${checked?p.color+"44":"#1e1e30"}`,borderRadius:3,
+                  color:checked?"#e8e4d9":"#333",padding:"2px 6px",fontSize:12,textAlign:"right"}}
                 value={percentage}
                 onChange={e => {
                   const val = parseFloat(e.target.value) || 0;
@@ -697,15 +730,16 @@ function Paginator({ total, page, perPage, onPage, onPerPage, pageSizeOptions = 
 
 // ─── TxDetailModal ────────────────────────────────────────────────────────────
 function TxDetailModal({ tx, inventory, onClose, onEdit, onUndo, fmt, pct, pillCls, salePillCls, toTitleCase, partnerFilters, activeProfiles, setDetailCard }) {
-  const venmo = tx.venmoAmount || 0;
-  const zelle = tx.zelleAmount || 0;
+  const venmo  = tx.venmoAmount || 0;
+  const zelle  = tx.zelleAmount || 0;
+  const binder = tx.binderAmount || 0;
   const cardsCostBasis = tx.cardsOut.reduce((s,co)=>{ const inv=inventory.find(x=>x.id===co.id); return s+(inv?inv.buyPrice:0); }, 0);
-  const totalPaidOut   = tx.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle);
+  const totalPaidOut   = tx.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle) + Math.max(0,-binder);
   const costBasis      = cardsCostBasis + totalPaidOut;
-  const netRevenue     = (tx.cashIn + Math.max(0,venmo) + Math.max(0,zelle)) - (tx.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle));
+  const netRevenue     = (tx.cashIn + Math.max(0,venmo) + Math.max(0,zelle) + Math.max(0,binder)) - (tx.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle) + Math.max(0,-binder));
   const txProfit       = tx.marketProfit != null ? tx.marketProfit : (() => {
-    const flowIn  = tx.cashIn  + Math.max(0,venmo)  + Math.max(0,zelle);
-    const flowOut = tx.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle);
+    const flowIn  = tx.cashIn  + Math.max(0,venmo)  + Math.max(0,zelle) + Math.max(0,binder);
+    const flowOut = tx.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle) + Math.max(0,-binder);
     const tradeIn = (tx.cardsIn||[]).reduce((s,ci)=>s+(parseFloat(ci.currentMarket)||parseFloat(ci.marketAtPurchase)||0),0);
     const basis   = tx.cardsOut.reduce((s,co)=>{ const inv=inventory.find(x=>x.id===co.id); return s+(inv?inv.buyPrice:0); },0);
     return (flowIn + tradeIn) - (basis + flowOut);
@@ -746,7 +780,7 @@ function TxDetailModal({ tx, inventory, onClose, onEdit, onUndo, fmt, pct, pillC
         </div>
 
         {/* Payment methods */}
-        {(tx.cashIn>0.005||tx.cashOut>0.005||venmo||zelle) && (
+        {(tx.cashIn>0.005||tx.cashOut>0.005||venmo||zelle||binder) && (
           <div style={{display:"flex",gap:10,flexWrap:"wrap",padding:"10px 12px",background:"#0a0a14",borderRadius:3,border:"1px solid #1a1a28"}}>
             {tx.cashIn>0.005  && <span className="profit">+{fmt(tx.cashIn)} 💵</span>}
             {tx.cashOut>0.005 && <span className="loss">-{fmt(tx.cashOut)} 💵</span>}
@@ -754,6 +788,8 @@ function TxDetailModal({ tx, inventory, onClose, onEdit, onUndo, fmt, pct, pillC
             {venmo<-0.005     && <span style={{color:"#f87171"}}>-{fmt(Math.abs(venmo))} 💙</span>}
             {zelle>0.005      && <span style={{color:"#c084fc"}}>+{fmt(zelle)} 💜</span>}
             {zelle<-0.005     && <span style={{color:"#f87171"}}>-{fmt(Math.abs(zelle))} 💜</span>}
+            {binder>0.005     && <span style={{color:"#f5a623"}}>+{fmt(binder)} 📖</span>}
+            {binder<-0.005    && <span style={{color:"#f87171"}}>-{fmt(Math.abs(binder))} 📖</span>}
           </div>
         )}
 
@@ -1005,15 +1041,358 @@ function CardDetailModal({ card, transactions, inventory, onClose, reload, fmt, 
   );
 }
 
+// ─── BinderStagingPage (full-page, not a modal) ───────────────────────────────
+function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt, pct }) {
+  const [csvText,      setCsvText]      = useState('');
+  const [fileName,     setFileName]     = useState('');
+  const [preview,      setPreview]      = useState(null);
+  const [loading,      setLoading]      = useState(false);
+  const [confirming,   setConfirming]   = useState(false);
+  const [err,          setErr]          = useState('');
+  const [costBasis,    setCostBasis]    = useState('');
+  const [binderCredit,    setBinderCredit]    = useState('');
+  const [saleProceeds,    setSaleProceeds]    = useState('');
+  const [saleBinder,      setSaleBinder]      = useState('');
+  const [importDate,   setImportDate]   = useState(new Date().toISOString().split('T')[0]);
+  const [importNotes,  setImportNotes]  = useState('');
+  const [owners,       setOwners]       = useState(() => getDefaultOwners());
+  const fileRef = useRef();
+
+  function handleFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = ev => {
+      setCsvText(ev.target.result);
+      setPreview(null);
+    };
+    reader.readAsText(file);
+  }
+
+  async function handlePreview(text) {
+    const src = text || csvText;
+    if (!src.trim()) { setErr('Please select a CSV file first.'); return; }
+    setLoading(true); setErr('');
+    try {
+      const r = await fetch('/api/binder/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ csvText: src }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Preview failed');
+      setPreview(d);
+      if (d.binderIn > 0) setBinderCredit(d.binderIn.toFixed(2));
+      if (d.binderOut > 0) setSaleBinder(d.binderOut.toFixed(2));
+    } catch (e) { setErr(e.message); }
+    finally { setLoading(false); }
+  }
+
+  async function handleConfirm() {
+    setConfirming(true); setErr('');
+    try {
+      const r = await fetch('/api/binder/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          csvText,
+          costBasis:    costBasis    ? parseFloat(costBasis)    : null,
+          binderCredit: binderCredit ? parseFloat(binderCredit) : null,
+          saleProceeds: saleProceeds ? parseFloat(saleProceeds) : null,
+          saleBinder:   saleBinder   ? parseFloat(saleBinder)   : null,
+          notes:        importNotes  || null,
+          date:         importDate,
+          owners:       owners.length > 0 ? owners : null,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Import failed');
+      onImported(d);
+    } catch (e) { setErr(e.message); }
+    finally { setConfirming(false); }
+  }
+
+  const effectiveAdded   = preview ? [...(preview.added||[]), ...(preview.qtyUp||[]).map(c=>({...c,quantity:c.delta}))] : [];
+  const effectiveRemoved = preview ? [...(preview.removed||[]), ...(preview.qtyDown||[]).map(c=>({...c,quantity:c.delta}))] : [];
+  const totalNewMkt      = preview ? (preview.totalNewValue || 0) : 0;
+  const totalRemovedMkt  = preview ? (preview.totalRemovedValue || 0) : 0;
+  const totalBasis       = (parseFloat(costBasis) || 0) + (parseFloat(binderCredit) || 0);
+  const totalProceeds    = (parseFloat(saleProceeds) || 0) + (parseFloat(saleBinder) || 0);
+
+  // Compute prorata per card (live as inputs change)
+  function getCardCost(c) {
+    const cardMkt = c.unit_price * (c.quantity || c.delta || 1);
+    return totalBasis > 0 && totalNewMkt > 0 ? totalBasis * (cardMkt / totalNewMkt) : null;
+  }
+  function getCardSale(c) {
+    const cardMkt = c.unit_price * (c.quantity || c.delta || 1);
+    return totalProceeds > 0 && totalRemovedMkt > 0 ? totalProceeds * (cardMkt / totalRemovedMkt) : null;
+  }
+
+  const mono = { fontFamily:"'Space Mono',monospace" };
+  const pillGreen = { background:'#0d2b0d', color:'#4ade80', padding:'4px 12px', borderRadius:4, fontSize:12, ...mono };
+  const pillRed   = { background:'#2b0d0d', color:'#f87171', padding:'4px 12px', borderRadius:4, fontSize:12, ...mono };
+  const pillGray  = { background:'#1a1a2e', color:'#666',    padding:'4px 12px', borderRadius:4, fontSize:12, ...mono };
+  const th = { padding:'6px 10px', color:'#666', fontSize:10, letterSpacing:1, textTransform:'uppercase', fontWeight:400, ...mono };
+  const td = (extra={}) => ({ padding:'6px 10px', fontSize:12, ...extra });
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:20}}>
+        <button className="btn btn-ghost btn-sm-wide" onClick={onBack}>← Binder</button>
+        <h2 className="section-title" style={{margin:0}}>IMPORT STAGING</h2>
+        {preview && <span style={{...pillGray,marginLeft:'auto'}}>
+          {preview.totalParsed} rows parsed
+        </span>}
+      </div>
+
+      {/* Upload row */}
+      <div className="panel" style={{padding:'14px 18px',marginBottom:16,display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+        <input ref={fileRef} type="file" accept=".csv,text/csv" style={{display:'none'}} onChange={e => {
+          handleFile(e);
+          if (e.target.files[0]) {
+            const reader = new FileReader();
+            reader.onload = ev => handlePreview(ev.target.result);
+            reader.readAsText(e.target.files[0]);
+          }
+        }} />
+        <button className="btn btn-primary" onClick={() => fileRef.current.click()} disabled={loading}>
+          {loading ? '⏳ Analyzing…' : '📂 Choose CSV'}
+        </button>
+        {fileName && <span style={{fontSize:12,color:'#4ade80'}}>✓ {fileName}</span>}
+        {csvText && !loading && (
+          <button className="btn btn-ghost btn-sm-wide" onClick={() => handlePreview()}>↺ Re-analyze</button>
+        )}
+        {err && <span style={{color:'#f87171',fontSize:12}}>{err}</span>}
+      </div>
+
+      {preview && (
+        <>
+          {/* Summary bar */}
+          <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
+            <span style={pillGreen}>+{effectiveAdded.reduce((s,c)=>s+(c.quantity||c.delta||1),0)} cards in ({effectiveAdded.length} types)</span>
+            <span style={pillRed}>-{effectiveRemoved.reduce((s,c)=>s+(c.quantity||c.delta||1),0)} cards out ({effectiveRemoved.length} types)</span>
+            <span style={pillGray}>{(preview.unchanged||[]).length} unchanged</span>
+          </div>
+
+          {/* Binder credit balance banner */}
+          {(preview.binderIn > 0 || preview.binderOut > 0) && (
+            <div style={{background:'#1a1400',border:'1px solid #f5a62344',borderRadius:6,padding:'10px 16px',
+              marginBottom:16,display:'flex',alignItems:'center',gap:16,flexWrap:'wrap'}}>
+              <span style={{fontSize:10,color:'#f5a623',...mono,letterSpacing:1}}>📖 UNSETTLED BINDER CREDITS</span>
+              {preview.binderIn > 0 && (
+                <span style={{fontSize:12,color:'#4ade80',...mono}}>↓ In: {fmt(preview.binderIn)}</span>
+              )}
+              {preview.binderOut > 0 && (
+                <span style={{fontSize:12,color:'#f87171',...mono}}>↑ Out: {fmt(preview.binderOut)}</span>
+              )}
+              <span style={{fontSize:11,color:'#888',flex:1}}>pre-filled below — adjust as needed</span>
+            </div>
+          )}
+
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:16}}>
+            {/* Financial inputs */}
+            <div className="panel" style={{padding:'14px 18px',display:'flex',flexDirection:'column',gap:10}}>
+              <div style={{fontSize:10,color:'#555',letterSpacing:2,...mono,marginBottom:4}}>FINANCIALS</div>
+              <label style={{display:'flex',flexDirection:'column',gap:4,fontSize:11,color:'#aaa'}}>
+                Date
+                <input className="input" type="date" value={importDate} onChange={e=>setImportDate(e.target.value)} />
+              </label>
+              {effectiveAdded.length > 0 && (
+                <>
+                  <div style={{display:'flex',gap:8}}>
+                    <label style={{display:'flex',flexDirection:'column',gap:4,fontSize:11,color:'#4ade80',flex:1}}>
+                      Cash paid ($)
+                      <input className="input" type="number" min="0" step="0.01"
+                        placeholder={`Mkt: ${fmt(totalNewMkt)}`}
+                        value={costBasis} onChange={e=>setCostBasis(e.target.value)} />
+                    </label>
+                    <label style={{display:'flex',flexDirection:'column',gap:4,fontSize:11,color:'#f5a623',flex:1}}>
+                      📖 Binder credit ($)
+                      <input className="input" type="number" step="0.01"
+                        placeholder="0.00"
+                        value={binderCredit} onChange={e=>setBinderCredit(e.target.value)} />
+                    </label>
+                  </div>
+                  <span style={{fontSize:10,color:'#555'}}>
+                    Total cost basis: {fmt(totalBasis)}
+                    {totalNewMkt > 0 && totalBasis > 0 && ` (${pct(totalBasis/totalNewMkt*100)} of mkt)`}
+                  </span>
+                </>
+              )}
+              {effectiveRemoved.length > 0 && (
+                <>
+                  <div style={{display:'flex',gap:8}}>
+                    <label style={{display:'flex',flexDirection:'column',gap:4,fontSize:11,color:'#f87171',flex:1}}>
+                      Sale proceeds ($)
+                      <input className="input" type="number" min="0" step="0.01"
+                        placeholder={`Mkt: ${fmt(totalRemovedMkt)}`}
+                        value={saleProceeds} onChange={e=>setSaleProceeds(e.target.value)} />
+                    </label>
+                    <label style={{display:'flex',flexDirection:'column',gap:4,fontSize:11,color:'#f5a623',flex:1}}>
+                      📖 Binder credit ($)
+                      <input className="input" type="number" step="0.01"
+                        placeholder="0.00"
+                        value={saleBinder} onChange={e=>setSaleBinder(e.target.value)} />
+                    </label>
+                  </div>
+                  <span style={{fontSize:10,color:'#555'}}>
+                    Total sale: {fmt(totalProceeds)}
+                    {totalRemovedMkt > 0 && totalProceeds > 0 && ` (${pct(totalProceeds/totalRemovedMkt*100)} of mkt)`}
+                  </span>
+                </>
+              )}
+              <label style={{display:'flex',flexDirection:'column',gap:4,fontSize:11,color:'#aaa'}}>
+                Notes
+                <input className="input" placeholder="Card show lot, trade, etc."
+                  value={importNotes} onChange={e=>setImportNotes(e.target.value)} />
+              </label>
+              {profiles.filter(p=>!p.archived).length > 0 && (
+                <div>
+                  <div style={{fontSize:10,color:'#555',letterSpacing:1,marginBottom:4,...mono}}>OWNERSHIP</div>
+                  <OwnershipSplit profiles={profiles.filter(p=>!p.archived)} owners={owners} onChange={setOwners} />
+                </div>
+              )}
+              {err && <div style={{color:'#f87171',fontSize:12}}>{err}</div>}
+              <button className="btn btn-primary" style={{marginTop:4}} onClick={handleConfirm} disabled={confirming}>
+                {confirming ? '⏳ Importing…' : '✓ Confirm Import'}
+              </button>
+            </div>
+
+            {/* Quick summary panel */}
+            <div className="panel" style={{padding:'14px 18px'}}>
+              <div style={{fontSize:10,color:'#555',letterSpacing:2,...mono,marginBottom:10}}>SUMMARY</div>
+              {[
+                { label:'New cards market value', val: fmt(totalNewMkt), color:'#4ade80' },
+                { label:'Cash paid',              val: costBasis ? fmt(parseFloat(costBasis)) : '—', color:'#4ade80' },
+                { label:'Binder credit',          val: binderCredit ? fmt(parseFloat(binderCredit)) : '—', color:'#f5a623' },
+                { label:'Total cost basis',       val: totalBasis > 0 ? fmt(totalBasis) : '—', color:'#f5a623' },
+                { label:'Intake %',               val: totalBasis > 0 && totalNewMkt > 0 ? pct(totalBasis/totalNewMkt*100) : '—', color:'#f5a623' },
+                { label:'Removed cards mkt value',val: fmt(totalRemovedMkt), color:'#f87171' },
+                { label:'Cash proceeds',          val: saleProceeds ? fmt(parseFloat(saleProceeds)) : '—', color:'#f87171' },
+                { label:'Binder credit (sale)',    val: saleBinder ? fmt(parseFloat(saleBinder)) : '—', color:'#f5a623' },
+                { label:'Total sale',             val: totalProceeds > 0 ? fmt(totalProceeds) : '—', color:'#f5a623' },
+                { label:'Sale %',                 val: totalProceeds > 0 && totalRemovedMkt > 0 ? pct(totalProceeds/totalRemovedMkt*100) : '—', color:'#f5a623' },
+              ].map(r => (
+                <div key={r.label} style={{display:'flex',justifyContent:'space-between',
+                  borderBottom:'1px solid #111',padding:'5px 0',fontSize:12}}>
+                  <span style={{color:'#666'}}>{r.label}</span>
+                  <span style={{...mono,color:r.color}}>{r.val}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* BOUGHT table */}
+          {effectiveAdded.length > 0 && (
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:11,color:'#4ade80',letterSpacing:2,...mono,marginBottom:8,fontWeight:700}}>
+                BOUGHT — {effectiveAdded.length} card type(s)
+              </div>
+              <div className="panel" style={{overflowX:'auto'}}>
+                <table style={{width:'100%',borderCollapse:'collapse'}}>
+                  <thead><tr style={{borderBottom:'1px solid #1a2a1a'}}>
+                    <th style={{...th,textAlign:'left'}}>Card</th>
+                    <th style={th}>Set</th>
+                    <th style={th}>Rarity</th>
+                    <th style={th}>Qty</th>
+                    <th style={th}>Mkt / unit</th>
+                    <th style={th}>Cost / unit</th>
+                    <th style={th}>Intake %</th>
+                  </tr></thead>
+                  <tbody>
+                    {effectiveAdded.map((c,i) => {
+                      const qty  = c.quantity || c.delta || 1;
+                      const cost = getCardCost(c);
+                      const unitCost = cost != null ? cost / qty : null;
+                      const intake = unitCost != null && c.unit_price > 0 ? unitCost / c.unit_price * 100 : null;
+                      return (
+                        <tr key={i} style={{borderTop:'1px solid #0d1a0d'}}>
+                          <td style={td()}>{c.card_name}</td>
+                          <td style={td({color:'#555',fontSize:11,maxWidth:120,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'})}>{c.set_name}</td>
+                          <td style={td({textAlign:'center'})}><span style={{fontSize:10,background:'#1a1a2e',color:'#aaa',padding:'2px 6px',borderRadius:3}}>{c.rarity||'—'}</span></td>
+                          <td style={td({textAlign:'center',...mono,color:'#4ade80'})}>+{qty}</td>
+                          <td style={td({textAlign:'right',...mono,color:'#f5a623'})}>{fmt(c.unit_price)}</td>
+                          <td style={td({textAlign:'right',...mono,color: unitCost!=null?'#4ade80':'#333'})}>{unitCost!=null?fmt(unitCost):'—'}</td>
+                          <td style={td({textAlign:'right',...mono,color: intake!=null?(intake<80?'#4ade80':intake<100?'#f5a623':'#f87171'):'#333'})}>
+                            {intake!=null?pct(intake):'—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* SOLD table */}
+          {effectiveRemoved.length > 0 && (
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:11,color:'#f87171',letterSpacing:2,...mono,marginBottom:8,fontWeight:700}}>
+                SOLD — {effectiveRemoved.length} card type(s)
+              </div>
+              <div className="panel" style={{overflowX:'auto'}}>
+                <table style={{width:'100%',borderCollapse:'collapse'}}>
+                  <thead><tr style={{borderBottom:'1px solid #2a1a1a'}}>
+                    <th style={{...th,textAlign:'left'}}>Card</th>
+                    <th style={th}>Set</th>
+                    <th style={th}>Rarity</th>
+                    <th style={th}>Qty</th>
+                    <th style={th}>Mkt / unit</th>
+                    <th style={th}>Sale / unit</th>
+                    <th style={th}>Sale %</th>
+                  </tr></thead>
+                  <tbody>
+                    {effectiveRemoved.map((c,i) => {
+                      const qty  = c.quantity || c.delta || 1;
+                      const sale = getCardSale(c);
+                      const unitSale = sale != null ? sale / qty : null;
+                      const pctSale  = unitSale != null && c.unit_price > 0 ? unitSale / c.unit_price * 100 : null;
+                      return (
+                        <tr key={i} style={{borderTop:'1px solid #2a1a1a'}}>
+                          <td style={td()}>{c.card_name}</td>
+                          <td style={td({color:'#555',fontSize:11,maxWidth:120,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'})}>{c.set_name}</td>
+                          <td style={td({textAlign:'center'})}><span style={{fontSize:10,background:'#1a1a2e',color:'#aaa',padding:'2px 6px',borderRadius:3}}>{c.rarity||'—'}</span></td>
+                          <td style={td({textAlign:'center',...mono,color:'#f87171'})}>-{qty}</td>
+                          <td style={td({textAlign:'right',...mono,color:'#f5a623'})}>{fmt(c.unit_price)}</td>
+                          <td style={td({textAlign:'right',...mono,color: unitSale!=null?'#4ade80':'#333'})}>{unitSale!=null?fmt(unitSale):'—'}</td>
+                          <td style={td({textAlign:'right',...mono,color: pctSale!=null?(pctSale>90?'#4ade80':pctSale>70?'#f5a623':'#f87171'):'#333'})}>
+                            {pctSale!=null?pct(pctSale):'—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {effectiveAdded.length === 0 && effectiveRemoved.length === 0 && (
+            <div className="panel" style={{padding:24,textAlign:'center',color:'#4ade80',fontSize:13}}>
+              ✓ No changes detected — binder is already up to date.
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   // ── Remote data ──────────────────────────────────────────────────────────────
-  const [inventory,    setInventory]    = useState([]);
-  const [transactions, setTransactions] = useState([]);
-  const [profiles,     setProfiles]     = useState([]);
-  const [equityDefaults, setEquityDefaults] = useState([]);
-  const [costs,        setCosts]        = useState([]);
-  const [loading,      setLoading]      = useState(true);
-  const [error,        setError]        = useState(null);
+  const [inventory,       setInventory]       = useState([]);
+  const [transactions,    setTransactions]    = useState([]);
+  const [profiles,        setProfiles]        = useState([]);
+  const [equityDefaults,  setEquityDefaults]  = useState([]);
+  const [costs,           setCosts]           = useState([]);
+  const [binderCards,     setBinderCards]     = useState([]);
+  const [binderImports,   setBinderImports]   = useState([]);
+  const [loading,         setLoading]         = useState(true);
+  const [error,           setError]           = useState(null);
 
   // Backup state
   const [lastBackup,    setLastBackup]    = useState(null);
@@ -1047,9 +1426,10 @@ export default function App() {
 
   async function reload() {
     try {
-      const [cards, txs, profs, eqDef, settings, costsData] = await Promise.all([
+      const [cards, txs, profs, eqDef, settings, costsData, binderData] = await Promise.all([
         api('/api/cards'), api('/api/transactions'), api('/api/profiles'),
         api('/api/equity-defaults'), api('/api/settings'), api('/api/costs'),
+        api('/api/binder/inventory'),
       ]);
       setInventory(cards);
       setTransactions(txs);
@@ -1057,6 +1437,8 @@ export default function App() {
       setEquityDefaults(eqDef.owners || []);
       if (settings.defaultNote !== undefined) setDefaultNote(settings.defaultNote || '');
       setCosts(costsData);
+      setBinderCards(binderData.cards || []);
+      setBinderImports(binderData.imports || []);
     } catch(e) { setError(e.message); }
   }
 
@@ -1105,13 +1487,22 @@ export default function App() {
   const [detailCard,    setDetailCard]    = useState(null);
   const [detailTx,      setDetailTx]      = useState(null);
 
+  // Binder state
+  const [showBinderImport,  setShowBinderImport]  = useState(false);
+  const [binderPreview,     setBinderPreview]     = useState(null);   // diff preview from server
+  const [binderCSVText,     setBinderCSVText]     = useState('');     // raw CSV text for confirm step
+  const [binderImporting,   setBinderImporting]   = useState(false);
+  const [binderSearch,      setBinderSearch]      = useState('');
+  const [binderPage,        setBinderPage]        = useState(0);
+  const [binderPP]                                = useState(50);
+
   // Profiles management state
   const [profileDraft,    setProfileDraft]    = useState({ name:"", color:"#f5a623", initials:"" });
   const [editingProfile,  setEditingProfile]  = useState(null); // profile object being edited
 
   // Add card form — ownership
   const [addCardOwners,  setAddCardOwners]  = useState([]);
-  const [addCardPayment, setAddCardPayment] = useState({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out" });
+  const [addCardPayment, setAddCardPayment] = useState({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out", binderAmt:"", binderDir:"in" });
 
   // Persist graded/raw preference across card adds
   const [prefIsGraded, setPrefIsGraded] = useState(true);
@@ -1133,6 +1524,8 @@ export default function App() {
   const [txZelleAmount,    setTxZelleAmount]    = useState("");
   const [txVenmoDir,       setTxVenmoDir]       = useState("in");
   const [txZelleDir,       setTxZelleDir]       = useState("in");
+  const [txBinderAmount,   setTxBinderAmount]   = useState("");
+  const [txBinderDir,      setTxBinderDir]      = useState("in");
   const [txCardsOut,   setTxCardsOut]   = useState([]);
   const [txCardsIn,    setTxCardsIn]    = useState([]);
   const [txImageUrl,   setTxImageUrl]   = useState("");
@@ -1153,6 +1546,7 @@ export default function App() {
   const [batchFinalPurchase, setBatchFinalPurchase] = useState("");
   const [batchImage,         setBatchImage]         = useState("");
   const [batchOwners,        setBatchOwners]        = useState([]);
+  const [batchPayment,       setBatchPayment]       = useState({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out", binderAmt:"", binderDir:"out" });
 
   // Filters
   const [soldPeriod,      setSoldPeriod]      = useState(() => new Date().toISOString().slice(0,7));
@@ -1283,35 +1677,37 @@ export default function App() {
     const pm           = addCardPayment;
     // Compute auto-split: empty fields share the remaining balance evenly
     const totalBuy     = normalized.buyPrice;
-    const amtKey       = { cash:"cashAmt", venmo:"venmoAmt", zelle:"zelleAmt" };
+    const amtKey       = { cash:"cashAmt", venmo:"venmoAmt", zelle:"zelleAmt", binder:"binderAmt" };
     const filledSum    = pm.methods.reduce((s,m) => s + (parseFloat(pm[amtKey[m]])||0), 0);
     const emptyCount   = pm.methods.filter(m => !pm[amtKey[m]]).length;
     const autoSplit    = emptyCount > 0 ? Math.max(0, totalBuy - filledSum) / emptyCount : 0;
     const resolve = m => pm.methods.includes(m) ? (parseFloat(pm[amtKey[m]]) || autoSplit) : 0;
-    const cashRaw  = resolve("cash");
-    const venmoRaw = resolve("venmo");
-    const zelleRaw = resolve("zelle");
-    const venmoSigned  = pm.methods.includes("venmo") ? (pm.venmoDir==="in" ?  venmoRaw : -venmoRaw) : null;
-    const zelleSigned  = pm.methods.includes("zelle") ? (pm.zelleDir==="in" ?  zelleRaw : -zelleRaw) : null;
+    const cashRaw   = resolve("cash");
+    const venmoRaw  = resolve("venmo");
+    const zelleRaw  = resolve("zelle");
+    const binderRaw = resolve("binder");
+    const venmoSigned   = pm.methods.includes("venmo")  ? (pm.venmoDir==="in"  ?  venmoRaw  : -venmoRaw)  : null;
+    const zelleSigned   = pm.methods.includes("zelle")  ? (pm.zelleDir==="in"  ?  zelleRaw  : -zelleRaw)  : null;
+    const binderSigned  = pm.methods.includes("binder") ? (pm.binderDir==="out" ? -binderRaw : binderRaw) : null;
     const hasCash      = pm.methods.includes("cash");
     const cashOut      = hasCash ? (pm.cashDir==="out" ? cashRaw : 0) : 0;
     const cashIn       = hasCash ? (pm.cashDir==="in"  ? cashRaw : 0) : 0;
     const mktIn        = normalized.currentMarket || normalized.marketAtPurchase || 0;
-    const totalOut     = cashOut + Math.max(0,-(venmoSigned||0)) + Math.max(0,-(zelleSigned||0));
+    const totalOut     = cashOut + Math.max(0,-(venmoSigned||0)) + Math.max(0,-(zelleSigned||0)) + Math.max(0,-(binderSigned||0));
     const marketProfit = mktIn - totalOut;
 
     await api('/api/transactions', { method:'POST', body:{
       type:'buy', date:addCardDate, notes, imageUrl:addCardImage || null,
       cashIn, cashOut, marketProfit, cardsOut:[], cardsIn:[normalized],
       paymentMethod: pm.methods.join(',') || null,
-      venmoAmount: venmoSigned, zelleAmount: zelleSigned,
+      venmoAmount: venmoSigned, zelleAmount: zelleSigned, binderAmount: binderSigned,
     }});
     setNewCard(blankCard());
     setAddCardDate(new Date().toISOString().split("T")[0]);
     setAddCardNotes("");
     setAddCardImage("");
     setAddCardOwners([]);
-    setAddCardPayment({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out" });
+    setAddCardPayment({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out", binderAmt:"", binderDir:"out" });
     setShowAddCard(false);
     await reload();
   }
@@ -1407,21 +1803,23 @@ export default function App() {
     const pm           = batchPayment;
     // Compute auto-split: empty fields share the remaining balance evenly
     const totalBuy     = cardsForTx.reduce((s,c) => s+(c.buyPrice||0), 0);
-    const amtKey       = { cash:"cashAmt", venmo:"venmoAmt", zelle:"zelleAmt" };
+    const amtKey       = { cash:"cashAmt", venmo:"venmoAmt", zelle:"zelleAmt", binder:"binderAmt" };
     const filledSum    = pm.methods.reduce((s,m) => s + (parseFloat(pm[amtKey[m]])||0), 0);
     const emptyCount   = pm.methods.filter(m => !pm[amtKey[m]]).length;
     const autoSplit    = emptyCount > 0 ? Math.max(0, totalBuy - filledSum) / emptyCount : 0;
     const resolve = m => pm.methods.includes(m) ? (parseFloat(pm[amtKey[m]]) || autoSplit) : 0;
-    const cashRaw  = resolve("cash");
-    const venmoRaw = resolve("venmo");
-    const zelleRaw = resolve("zelle");
-    const venmoSigned  = pm.methods.includes("venmo") ? (pm.venmoDir==="in" ?  venmoRaw : -venmoRaw) : null;
-    const zelleSigned  = pm.methods.includes("zelle") ? (pm.zelleDir==="in" ?  zelleRaw : -zelleRaw) : null;
+    const cashRaw   = resolve("cash");
+    const venmoRaw  = resolve("venmo");
+    const zelleRaw  = resolve("zelle");
+    const binderRaw = resolve("binder");
+    const venmoSigned   = pm.methods.includes("venmo")  ? (pm.venmoDir==="in"  ?  venmoRaw  : -venmoRaw)  : null;
+    const zelleSigned   = pm.methods.includes("zelle")  ? (pm.zelleDir==="in"  ?  zelleRaw  : -zelleRaw)  : null;
+    const binderSigned  = pm.methods.includes("binder") ? (pm.binderDir==="out" ? -binderRaw : binderRaw) : null;
     const hasCash      = pm.methods.includes("cash");
     const cashOut      = hasCash ? (pm.cashDir==="out" ? cashRaw : 0) : 0;
     const cashIn       = hasCash ? (pm.cashDir==="in"  ? cashRaw : 0) : 0;
     const mktIn        = cardsForTx.reduce((s,c) => s+(c.currentMarket||c.marketAtPurchase||0), 0);
-    const totalOut     = cashOut + Math.max(0,-(venmoSigned||0)) + Math.max(0,-(zelleSigned||0));
+    const totalOut     = cashOut + Math.max(0,-(venmoSigned||0)) + Math.max(0,-(zelleSigned||0)) + Math.max(0,-(binderSigned||0));
     const marketProfit = mktIn - totalOut;
     const notes        = batchNotes.trim() || defaultNote;
 
@@ -1429,10 +1827,10 @@ export default function App() {
       type:'buy', date:batchDate, notes, imageUrl:batchImage || null,
       cashIn, cashOut, marketProfit, cardsOut:[], cardsIn:cardsForTx,
       paymentMethod: pm.methods.join(',') || null,
-      venmoAmount: venmoSigned, zelleAmount: zelleSigned,
+      venmoAmount: venmoSigned, zelleAmount: zelleSigned, binderAmount: binderSigned,
     }});
     setBatchCards([]); setBatchDraft(blankCard()); setBatchFinalPurchase(""); setBatchImage(""); setBatchOwners([]);
-    setBatchPayment({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out" });
+    setBatchPayment({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out", binderAmt:"", binderDir:"out" });
     setShowBatch(false);
     await reload();
   }
@@ -1539,8 +1937,13 @@ export default function App() {
       zelleFinal = hasZelleSel ? (txZelleDir==="in" ? zelleRaw : -zelleRaw) : 0;
     }
 
-    const totalFlowIn    = cashIn + (venmoFinal>0?venmoFinal:0) + (zelleFinal>0?zelleFinal:0);
-    const totalFlowOut   = cashOut + (venmoFinal<0?-venmoFinal:0) + (zelleFinal<0?-zelleFinal:0);
+    const binderAmt = txPaymentMethods.includes('binder') && txBinderAmount
+      ? (txBinderDir === 'out' ? -parseFloat(txBinderAmount) : parseFloat(txBinderAmount))
+      : null;
+    const binderIn  = binderAmt != null && binderAmt > 0 ? binderAmt : 0;
+    const binderOut = binderAmt != null && binderAmt < 0 ? -binderAmt : 0;
+    const totalFlowIn    = cashIn + (venmoFinal>0?venmoFinal:0) + (zelleFinal>0?zelleFinal:0) + binderIn;
+    const totalFlowOut   = cashOut + (venmoFinal<0?-venmoFinal:0) + (zelleFinal<0?-zelleFinal:0) + binderOut;
     const totalMkt       = txCardsOut.reduce((s,c) => s+(c.currentMarket||0), 0);
     const hasPerCard     = txCardsOut.some(c => c.tradedAtPrice && toF(c.tradedAtPrice)>0);
     const getSalePrice = card => {
@@ -1551,12 +1954,12 @@ export default function App() {
     const costBasis    = txCardsOut.reduce((s,c) => s+(c.buyPrice||0), 0);
     const mktIn        = txCardsIn.reduce((s,c) => s+(toF(c.currentMarket)||toF(c.marketAtPurchase)||0), 0);
     const marketProfit = (totalFlowIn + mktIn) - (costBasis + totalFlowOut);
-
     await api('/api/transactions', { method:'POST', body:{
       type:txType, date:txDate, notes, cashIn, cashOut, marketProfit, imageUrl:txImageUrl || null,
       paymentMethod: txPaymentMethods.join(',') || null,
       venmoAmount: venmoFinal || null,
       zelleAmount: zelleFinal || null,
+      binderAmount: binderAmt,
       cardsOut: txCardsOut.map(c => ({...c, salePrice:getSalePrice(c)})),
       cardsIn:  txCardsIn,
     }});
@@ -1564,7 +1967,8 @@ export default function App() {
     setTxNotes(''); setTxCashAmt(''); setTxCashDir('in'); setTxImageUrl('');
     setTxCardsOut([]); setTxCardsIn([]); setNewTradeCard(blankCard()); setTxCardSearch('');
     setTxPaymentMethods(['cash']); setTxVenmoAmount(''); setTxZelleAmount('');
-    setTxVenmoDir('in'); setTxZelleDir('in'); setTxFinalPrice(''); setTxInFinalPrice('');
+    setTxVenmoDir('in'); setTxZelleDir('in'); setTxBinderAmount(''); setTxBinderDir('in');
+    setTxFinalPrice(''); setTxInFinalPrice('');
     setShowAddTx(false);
     await reload();
     setView('transactions');
@@ -1610,6 +2014,7 @@ export default function App() {
     const cashOut    = toF(editTx.cashOut);
     const venmo      = toF(editTx.venmoAmount) || 0;
     const zelle      = toF(editTx.zelleAmount) || 0;
+    const binder     = toF(editTx.binderAmount) || 0;
     const updatedOut = editTx.cardsOut.map(c => ({...c, salePrice:toF(c.salePrice)}));
 
     // Full cost basis: what we originally paid for cards going out
@@ -1622,9 +2027,9 @@ export default function App() {
     const mktIn = (editTx.cardsIn||[]).reduce((s,c) =>
       s + (toF(c.currentMarket)||toF(c.marketAtPurchase)||0), 0);
 
-    // Total money in / out across all payment methods
-    const totalIn  = cashIn  + Math.max(0, venmo)  + Math.max(0, zelle);
-    const totalOut = cashOut + Math.max(0, -venmo) + Math.max(0, -zelle);
+    // Total money in / out across all payment methods (including binder)
+    const totalIn  = cashIn  + Math.max(0, venmo)  + Math.max(0, zelle) + Math.max(0, binder);
+    const totalOut = cashOut + Math.max(0, -venmo) + Math.max(0, -zelle) + Math.max(0, -binder);
 
     // marketProfit = (all cash in + trade-in market value) - (cost basis of cards out + all cash out)
     const marketProfit = (totalIn + mktIn) - (costBasis + totalOut);
@@ -1641,6 +2046,7 @@ export default function App() {
       paymentMethod: editTx.paymentMethod || null,
       venmoAmount: venmo || null,
       zelleAmount: zelle || null,
+      binderAmount: binder || null,
     }});
     setEditTx(null);
     await reload();
@@ -1776,7 +2182,7 @@ export default function App() {
             <span className="hero-logo" style={{fontFamily:"'Black Han Sans',sans-serif",fontSize:17,letterSpacing:3,color:"#f5a623"}}>CARDLEDGER</span>
           </div>
           <nav style={{display:"flex",overflowX:"auto",flex:1,minWidth:0}}>
-            {[{k:"in_stock",l:`Stock (${inStockCards.length})`},{k:"sold",l:`Sold (${soldCards.length})`},{k:"transactions",l:"Txns"},{k:"stats",l:"Analytics"},{k:"costs",l:"Costs"}].map(v => (
+            {[{k:"in_stock",l:`Stock (${inStockCards.length})`},{k:"binder",l:`Binder (${binderCards.length})`},{k:"sold",l:`Sold (${soldCards.length})`},{k:"transactions",l:"Txns"},{k:"stats",l:"Analytics"},{k:"costs",l:"Costs"}].map(v => (
               <button key={v.k} className={`nav-btn ${view===v.k?"active":""}`} onClick={() => setView(v.k)}>{v.l}</button>
             ))}
             <button className="nav-btn" onClick={() => setShowProfiles(true)} style={{marginLeft:"auto",color:"#f5a623",flexShrink:0}}>
@@ -1920,6 +2326,135 @@ export default function App() {
             </div>
           ))}
         </div>
+
+        {/* ═══ BINDER ═══ */}
+        {view === "binder" && (() => {
+          const binderTotal    = binderCards.reduce((s, c) => s + c.unit_price * c.quantity, 0);
+          const binderTotalQty = binderCards.reduce((s, c) => s + c.quantity, 0);
+          const search         = binderSearch.toLowerCase();
+          const filtered       = binderCards.filter(c =>
+            !search || c.card_name.toLowerCase().includes(search)
+              || (c.set_name  || '').toLowerCase().includes(search)
+              || (c.rarity    || '').toLowerCase().includes(search)
+              || (c.set_number|| '').toLowerCase().includes(search)
+          );
+          const pageSlice = filtered.slice(binderPage * binderPP, (binderPage + 1) * binderPP);
+          const mono = { fontFamily:"'Space Mono',monospace" };
+          return (
+            <div>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14,flexWrap:'wrap',gap:8}}>
+                <h2 className="section-title">BINDER</h2>
+                <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+                  <input className="input" style={{width:200,maxWidth:'100%',fontSize:11,padding:'6px 10px'}}
+                    placeholder="Search binder..." value={binderSearch}
+                    onChange={e => { setBinderSearch(e.target.value); setBinderPage(0); }} />
+                  <button className="btn btn-primary btn-sm-wide" onClick={() => setView('binder_staging')}>
+                    📥 Import CSV
+                  </button>
+                </div>
+              </div>
+
+              {/* Stats row */}
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:10,marginBottom:16}}>
+                {[
+                  { label:'Unique Cards', value: binderCards.length },
+                  { label:'Total Cards',  value: binderTotalQty },
+                  { label:'Total Value',  value: fmt(binderTotal) },
+                  { label:'Imports',      value: binderImports.length },
+                ].map(s => (
+                  <div key={s.label} className="panel" style={{padding:'12px 16px',textAlign:'center'}}>
+                    <div style={{fontSize:18,fontWeight:700,color:'#f5a623',...mono}}>{s.value}</div>
+                    <div style={{fontSize:10,color:'#666',marginTop:2}}>{s.label}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Inventory table */}
+              <div className="panel" style={{overflowX:'auto'}}>
+                {binderCards.length === 0 ? (
+                  <div className="empty">
+                    No binder data yet. Click <strong>Import CSV</strong> to sync your RareCandy inventory.
+                  </div>
+                ) : filtered.length === 0 ? (
+                  <div className="empty">No cards match your search.</div>
+                ) : (
+                  <>
+                    <table>
+                      <thead><tr>
+                        <th>Card</th><th>Set</th>
+                        <th className="hide-sm">Number</th>
+                        <th className="hide-sm">Rarity</th>
+                        <th>Qty</th><th>Unit Price</th><th>Total</th>
+                      </tr></thead>
+                      <tbody>
+                        {pageSlice.map(c => (
+                          <tr key={c.id}>
+                            <td><span style={{fontWeight:600}}>{c.card_name}</span></td>
+                            <td style={{fontSize:11,color:'#888',maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c.set_name}</td>
+                            <td className="hide-sm" style={{textAlign:'center',color:'#555',fontSize:11}}>{c.set_number}</td>
+                            <td className="hide-sm" style={{textAlign:'center'}}>
+                              <span style={{fontSize:10,color:'#aaa',background:'#1a1a2e',padding:'2px 6px',borderRadius:3}}>{c.rarity||'—'}</span>
+                            </td>
+                            <td style={{textAlign:'center',...mono,fontSize:12}}>{c.quantity}</td>
+                            <td style={{textAlign:'right',...mono,fontSize:12,color:'#f5a623'}}>{fmt(c.unit_price)}</td>
+                            <td style={{textAlign:'right',...mono,fontSize:12}}>{fmt(c.unit_price*c.quantity)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <Paginator page={binderPage} setPage={setBinderPage} total={filtered.length} pp={binderPP} />
+                  </>
+                )}
+              </div>
+
+              {/* Import history */}
+              {binderImports.length > 0 && (
+                <div style={{marginTop:20}}>
+                  <h3 style={{fontSize:12,color:'#555',marginBottom:8,...mono,letterSpacing:1}}>IMPORT HISTORY</h3>
+                  <div className="panel" style={{overflowX:'auto'}}>
+                    <table>
+                      <thead><tr>
+                        <th>Date</th>
+                        <th style={{color:'#4ade80'}}>+Added</th>
+                        <th style={{color:'#f87171'}}>-Removed</th>
+                        <th>Unchanged</th><th>Cost Basis</th><th>Sale Proceeds</th><th>Notes</th>
+                      </tr></thead>
+                      <tbody>
+                        {binderImports.map(imp => (
+                          <tr key={imp.id}>
+                            <td style={{fontSize:11,color:'#888',...mono}}>{new Date(imp.imported_at).toLocaleDateString()}</td>
+                            <td style={{textAlign:'center',color:'#4ade80',fontSize:12}}>+{(imp.cards_added||0)+(imp.qty_increased||0)}</td>
+                            <td style={{textAlign:'center',color:'#f87171',fontSize:12}}>-{(imp.cards_removed||0)+(imp.qty_decreased||0)}</td>
+                            <td style={{textAlign:'center',color:'#555',fontSize:12}}>{imp.cards_unchanged}</td>
+                            <td style={{textAlign:'right',color:'#f5a623',fontSize:12,...mono}}>{imp.cost_basis!=null?fmt(imp.cost_basis):'—'}</td>
+                            <td style={{textAlign:'right',color:'#f5a623',fontSize:12,...mono}}>{imp.sale_proceeds!=null?fmt(imp.sale_proceeds):'—'}</td>
+                            <td style={{fontSize:11,color:'#666',maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{imp.notes||'—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* ═══ BINDER STAGING ═══ */}
+        {view === "binder_staging" && (
+          <BinderStagingPage
+            onBack={() => setView('binder')}
+            onImported={async (result) => {
+              await reload();
+              setView('binder');
+              alert(`Import complete: +${result.added} added, -${result.removed} removed.`);
+            }}
+            profiles={profiles}
+            getDefaultOwners={getDefaultOwners}
+            fmt={fmt}
+            pct={pct}
+          />
+        )}
 
         {/* ═══ IN STOCK ═══ */}
         {view === "in_stock" && (
@@ -2205,24 +2740,30 @@ export default function App() {
                 inventory.some(c => c.transactionId === t.id && c.owners?.some(o => partnerFilters.includes(o.profileId)))
               )
             : allFilteredTx;
-          const dayCashIn   = filteredTx.reduce((s,t)=>s+t.cashIn,0);
-          const dayCashOut  = filteredTx.reduce((s,t)=>s+t.cashOut,0);
-          const dayVenmoIn  = filteredTx.reduce((s,t)=>s+Math.max(0,t.venmoAmount||0),0);
-          const dayVenmoOut = filteredTx.reduce((s,t)=>s+Math.max(0,-(t.venmoAmount||0)),0);
-          const dayZelleIn  = filteredTx.reduce((s,t)=>s+Math.max(0,t.zelleAmount||0),0);
-          const dayZelleOut = filteredTx.reduce((s,t)=>s+Math.max(0,-(t.zelleAmount||0)),0);
+          const dayCashIn    = filteredTx.reduce((s,t)=>s+t.cashIn,0);
+          const dayCashOut   = filteredTx.reduce((s,t)=>s+t.cashOut,0);
+          const dayVenmoIn   = filteredTx.reduce((s,t)=>s+Math.max(0,t.venmoAmount||0),0);
+          const dayVenmoOut  = filteredTx.reduce((s,t)=>s+Math.max(0,-(t.venmoAmount||0)),0);
+          const dayZelleIn   = filteredTx.reduce((s,t)=>s+Math.max(0,t.zelleAmount||0),0);
+          const dayZelleOut  = filteredTx.reduce((s,t)=>s+Math.max(0,-(t.zelleAmount||0)),0);
+          const dayBinderIn  = filteredTx.reduce((s,t)=>s+Math.max(0,t.binderAmount||0),0);
+          const dayBinderOut = filteredTx.reduce((s,t)=>s+Math.max(0,-(t.binderAmount||0)),0);
           const dayNetCash  = (dayCashIn + dayVenmoIn + dayZelleIn) - (dayCashOut + dayVenmoOut + dayZelleOut);
           const dayProfit  = filteredTx.reduce((s,t) => {
             if (t.marketProfit != null) return s + t.marketProfit;
             const v = t.venmoAmount || 0;
             const z = t.zelleAmount || 0;
-            const flowIn  = t.cashIn  + Math.max(0,v)  + Math.max(0,z);
-            const flowOut = t.cashOut + Math.max(0,-v) + Math.max(0,-z);
+            const b = t.binderAmount || 0;
+            const flowIn  = t.cashIn  + Math.max(0,v) + Math.max(0,z) + Math.max(0,b);
+            const flowOut = t.cashOut + Math.max(0,-v) + Math.max(0,-z) + Math.max(0,-b);
             const tradeIn = t.cardsIn.reduce((cs,ci)=>cs+(toF(ci.currentMarket)||toF(ci.marketAtPurchase)||0),0);
             const basis   = t.cardsOut.reduce((cs,co)=>{const inv=inventory.find(x=>x.id===co.id);return cs+(inv?inv.buyPrice:0);},0);
             return s + (flowIn + tradeIn) - (basis + flowOut);
           },0);
           const txDates = [...new Set(transactions.map(t=>t.date))].sort((a,b)=>b.localeCompare(a));
+          const txMonths = [...new Set(txDates.map(d=>d.slice(0,7)))].sort((a,b)=>b.localeCompare(a));
+          const chipMonth = txMonths.includes(txDateFilter.slice(0,7)) ? txDateFilter.slice(0,7) : (txMonths[0]||txDateFilter.slice(0,7));
+          const chipDates = txDates.filter(d=>d.startsWith(chipMonth));
           return (
             <div>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:10}}>
@@ -2243,26 +2784,48 @@ export default function App() {
               </div>
 
               {txFilterMode==="day" && txDates.length>0 && (
-                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
-                  {txDates.map(d=>{
-                    const dayT   = transactions.filter(t=>t.date===d);
-                    const cashIn = dayT.reduce((s,t)=>s+t.cashIn,0);
-                    const cashOut= dayT.reduce((s,t)=>s+t.cashOut,0);
-                    const vIn    = dayT.reduce((s,t)=>s+Math.max(0,t.venmoAmount||0),0);
-                    const vOut   = dayT.reduce((s,t)=>s+Math.max(0,-(t.venmoAmount||0)),0);
-                    const zIn    = dayT.reduce((s,t)=>s+Math.max(0,t.zelleAmount||0),0);
-                    const zOut   = dayT.reduce((s,t)=>s+Math.max(0,-(t.zelleAmount||0)),0);
-                    const rev    = (cashIn+vIn+zIn)-(cashOut+vOut+zOut);
-                    const isA    = d===txDateFilter;
-                    return (
-                      <button key={d} onClick={()=>setTxDateFilter(d)}
-                        style={{background:isA?"#1a1208":"#111118",border:isA?"1px solid #f5a623":"1px solid #1e1e28",borderRadius:3,padding:"5px 12px",cursor:"pointer",fontFamily:"'Space Mono',monospace",fontSize:10,color:isA?"#f5a623":"#777",display:"flex",gap:8,alignItems:"center"}}>
-                        <span>{d}</span>
-                        <span style={{color:rev>=0?"#f5a623":"#f87171",fontWeight:700}}>{rev>=0?"+":"-"}{fmt(rev)}</span>
-                        <span style={{color:"#444"}}>{dayT.length}tx</span>
-                      </button>
-                    );
-                  })}
+                <div style={{marginBottom:14}}>
+                  {/* Month selector */}
+                  {txMonths.length>1 && (
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8,alignItems:"center"}}>
+                      <select className="input" value={chipMonth} onChange={e=>{
+                        const m=e.target.value;
+                        const datesInMonth=txDates.filter(d=>d.startsWith(m));
+                        if(datesInMonth.length) setTxDateFilter(datesInMonth[0]);
+                      }} style={{width:"auto",padding:"4px 8px",fontSize:11,fontFamily:"'Space Mono',monospace"}}>
+                        {txMonths.map(m=>{
+                          const mDates=txDates.filter(d=>d.startsWith(m));
+                          const mTx=transactions.filter(t=>t.date.startsWith(m));
+                          const rev=mTx.reduce((s,t)=>s+(t.cashIn+Math.max(0,t.venmoAmount||0)+Math.max(0,t.zelleAmount||0)+Math.max(0,t.binderAmount||0))-(t.cashOut+Math.max(0,-(t.venmoAmount||0))+Math.max(0,-(t.zelleAmount||0))+Math.max(0,-(t.binderAmount||0))),0);
+                          return <option key={m} value={m}>{m} · {mDates.length}d · {mTx.length}tx · {rev>=0?"+":""}{fmt(rev)}</option>;
+                        })}
+                      </select>
+                    </div>
+                  )}
+                  {/* Day chips for selected month */}
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                    {chipDates.map(d=>{
+                      const dayT   = transactions.filter(t=>t.date===d);
+                      const cashIn = dayT.reduce((s,t)=>s+t.cashIn,0);
+                      const cashOut= dayT.reduce((s,t)=>s+t.cashOut,0);
+                      const vIn    = dayT.reduce((s,t)=>s+Math.max(0,t.venmoAmount||0),0);
+                      const vOut   = dayT.reduce((s,t)=>s+Math.max(0,-(t.venmoAmount||0)),0);
+                      const zIn    = dayT.reduce((s,t)=>s+Math.max(0,t.zelleAmount||0),0);
+                      const zOut   = dayT.reduce((s,t)=>s+Math.max(0,-(t.zelleAmount||0)),0);
+                      const bIn    = dayT.reduce((s,t)=>s+Math.max(0,t.binderAmount||0),0);
+                      const bOut   = dayT.reduce((s,t)=>s+Math.max(0,-(t.binderAmount||0)),0);
+                      const rev    = (cashIn+vIn+zIn+bIn)-(cashOut+vOut+zOut+bOut);
+                      const isA    = d===txDateFilter;
+                      return (
+                        <button key={d} onClick={()=>setTxDateFilter(d)}
+                          style={{background:isA?"#1a1208":"#111118",border:isA?"1px solid #f5a623":"1px solid #1e1e28",borderRadius:3,padding:"5px 12px",cursor:"pointer",fontFamily:"'Space Mono',monospace",fontSize:10,color:isA?"#f5a623":"#777",display:"flex",gap:8,alignItems:"center"}}>
+                          <span>{d.slice(5)}</span>
+                          <span style={{color:rev>=0?"#f5a623":"#f87171",fontWeight:700}}>{rev>=0?"+":"-"}{fmt(rev)}</span>
+                          <span style={{color:"#444"}}>{dayT.length}tx</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 
@@ -2325,10 +2888,30 @@ export default function App() {
                     </>
                   )}
 
+                  {/* ── Binder Row (only if any binder) ─────────── */}
+                  {(dayBinderIn>0||dayBinderOut>0)&&(
+                    <>
+                      <div style={{fontSize:9,letterSpacing:2,color:"#f5a62366",textTransform:"uppercase",marginBottom:4,paddingLeft:2}}>📖 Binder</div>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(100px,1fr))",gap:5,marginBottom:8}}>
+                        {[
+                          {label:"Binder In",  val:"+"+fmt(dayBinderIn),  color:"#f5a623", bg:"#1a1000", border:"#f5a62322"},
+                          {label:"Binder Out", val:"-"+fmt(dayBinderOut), color:"#f87171", bg:"#1a1000", border:"#f5a62322"},
+                          {label:"Net Binder", val:(dayBinderIn-dayBinderOut>=0?"+":"-")+fmt(dayBinderIn-dayBinderOut),
+                            color:(dayBinderIn-dayBinderOut)>=0?"#f5a623":"#f87171", bg:"#14100a", border:"#f5a62333"},
+                        ].map(s=>(
+                          <div key={s.label} style={{background:s.bg,border:`1px solid ${s.border}`,borderRadius:4,padding:"8px 12px"}}>
+                            <div style={{fontSize:9,letterSpacing:1.5,color:"#f5a62388",textTransform:"uppercase",marginBottom:3}}>{s.label}</div>
+                            <div style={{fontFamily:"'Black Han Sans',sans-serif",fontSize:15,color:s.color}}>{s.val}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+
                   {/* ── Summary Row ───────────────────────────────── */}
                   {(()=>{
-                    const totalIn  = dayCashIn  + dayVenmoIn  + dayZelleIn;
-                    const totalOut = dayCashOut + dayVenmoOut + dayZelleOut;
+                    const totalIn  = dayCashIn  + dayVenmoIn  + dayZelleIn + dayBinderIn;
+                    const totalOut = dayCashOut + dayVenmoOut + dayZelleOut + dayBinderOut;
                     const revenue  = totalIn - totalOut;
                     return (
                       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(100px,1fr))",gap:5}}>
@@ -2365,18 +2948,19 @@ export default function App() {
                 const cardsCostBasis = t.cardsOut.reduce((s,co)=>{const inv=inventory.find(x=>x.id===co.id);return s+(inv?inv.buyPrice:0);},0);
                 const venmo       = t.venmoAmount || 0;
                 const zelle       = t.zelleAmount || 0;
-                const totalPaidOut = t.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle);
-                // Cost basis = original buy prices of cards going out + any cash/venmo/zelle paid out
+                const binder      = t.binderAmount || 0;
+                const totalPaidOut = t.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle) + Math.max(0,-binder);
+                // Cost basis = original buy prices of cards going out + any cash/venmo/zelle/binder paid out
                 const costBasis   = cardsCostBasis + totalPaidOut;
-                const netRevenue  = (t.cashIn + Math.max(0,venmo) + Math.max(0,zelle))
-                                  - (t.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle));
+                const netRevenue  = (t.cashIn + Math.max(0,venmo) + Math.max(0,zelle) + Math.max(0,binder))
+                                  - (t.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle) + Math.max(0,-binder));
                 const txProfit  = t.marketProfit != null ? t.marketProfit : (()=>{
                   const v = t.venmoAmount || 0;
                   const z = t.zelleAmount || 0;
-                  const flowIn  = t.cashIn  + Math.max(0,v)  + Math.max(0,z);
-                  const flowOut = t.cashOut + Math.max(0,-v) + Math.max(0,-z);
+                  const b = t.binderAmount || 0;
+                  const flowIn  = t.cashIn  + Math.max(0,v)  + Math.max(0,z) + Math.max(0,b);
+                  const flowOut = t.cashOut + Math.max(0,-v) + Math.max(0,-z) + Math.max(0,-b);
                   const tradeIn = (t.cardsIn||[]).reduce((s,ci)=>s+(toF(ci.currentMarket)||toF(ci.marketAtPurchase)||0),0);
-                  // cost basis = what we originally paid for cards that went out
                   const basis   = t.cardsOut.reduce((s,co)=>{const inv=inventory.find(x=>x.id===co.id);return s+(inv?inv.buyPrice:0);},0);
                   return (flowIn + tradeIn) - (basis + flowOut);
                 })();
@@ -2395,13 +2979,18 @@ export default function App() {
                         {t.notes && <span style={{fontSize:11,color:"#888",background:"#1a1a10",border:"1px solid #2a2a18",borderRadius:3,padding:"1px 8px"}}>📍 {t.notes}</span>}
                         {t.imageUrl && <span style={{fontSize:10,color:"#555"}}>📷</span>}
                         {t.paymentMethod && t.paymentMethod.split(',').map(pm=>pm.trim()).filter(Boolean).map(pm=>{
-                          const amt = pm==="venmo" ? t.venmoAmount
-                            : pm==="zelle" ? t.zelleAmount
-                            : pm==="cash"  ? (t.cashIn>0.005 ? t.cashIn : t.cashOut>0.005 ? -t.cashOut : null)
+                          const amt = pm==="venmo"   ? t.venmoAmount
+                            : pm==="zelle"  ? t.zelleAmount
+                            : pm==="binder" ? t.binderAmount
+                            : pm==="cash"   ? (t.cashIn>0.005 ? t.cashIn : t.cashOut>0.005 ? -t.cashOut : null)
                             : null;
+                          const bg    = pm==="cash"?"#141a0a":pm==="venmo"?"#080e1a":pm==="zelle"?"#10081a":pm==="binder"?"#1a1000":"#0e0e18";
+                          const clr   = pm==="cash"?"#86efac":pm==="venmo"?"#60a5fa":pm==="zelle"?"#c084fc":pm==="binder"?"#f5a623":"#888";
+                          const bdr   = pm==="cash"?"#16a34a33":pm==="venmo"?"#2563eb33":pm==="zelle"?"#9333ea33":pm==="binder"?"#f5a62344":"#333";
+                          const icon  = pm==="cash"?"💵":pm==="venmo"?"💙":pm==="zelle"?"💜":pm==="binder"?"📖":"·";
                           return (
-                            <span key={pm} style={{fontSize:10,fontFamily:"'Space Mono',monospace",letterSpacing:1,background:pm==="cash"?"#141a0a":pm==="venmo"?"#080e1a":"#10081a",color:pm==="cash"?"#86efac":pm==="venmo"?"#60a5fa":"#c084fc",border:`1px solid ${pm==="cash"?"#16a34a33":pm==="venmo"?"#2563eb33":"#9333ea33"}`,borderRadius:3,padding:"1px 7px",textTransform:"uppercase",flexShrink:0}}>
-                              {pm==="cash"?"💵":pm==="venmo"?"💙":"💜"} {pm}{amt!=null?` ${amt>=0?"+":"-"}${fmt(Math.abs(amt))}`:""}
+                            <span key={pm} style={{fontSize:10,fontFamily:"'Space Mono',monospace",letterSpacing:1,background:bg,color:clr,border:`1px solid ${bdr}`,borderRadius:3,padding:"1px 7px",textTransform:"uppercase",flexShrink:0}}>
+                              {icon} {pm}{amt!=null?` ${amt>=0?"+":"-"}${fmt(Math.abs(amt))}`:""}
                             </span>
                           );
                         })}
@@ -2820,7 +3409,7 @@ export default function App() {
               const canAdd = missing.length === 0;
               return (
                 <>
-                  <BuyPaymentUI payment={addCardPayment} onChange={setAddCardPayment} buyPrice={toF(newCard.buyPrice)}/>
+                  <BuyPaymentUI payment={addCardPayment} onChange={setAddCardPayment} buyPrice={toF(newCard.buyPrice)} allowBinder/>
                   <OwnershipSplit profiles={profiles} owners={addCardOwners} onChange={setAddCardOwners}/>
                   <div style={{marginTop:14}}>
                     <ImagePicker value={addCardImage} onChange={setAddCardImage} label="Transaction Photo (optional)"/>
@@ -2942,7 +3531,7 @@ export default function App() {
             const effectiveBuyPrice = toF(batchFinalPurchase)>0 ? toF(batchFinalPurchase) : totalCost;
             return (
               <>
-                <BuyPaymentUI payment={batchPayment} onChange={setBatchPayment} buyPrice={effectiveBuyPrice}/>
+                <BuyPaymentUI payment={batchPayment} onChange={setBatchPayment} buyPrice={effectiveBuyPrice} allowBinder/>
                 <OwnershipSplit profiles={profiles} owners={batchOwners} onChange={setBatchOwners}/>
                 <div style={{marginTop:14}}>
                   <ImagePicker value={batchImage} onChange={setBatchImage} label="Transaction Photo (optional)"/>
@@ -3254,13 +3843,13 @@ export default function App() {
               const saleRef    = txType==="sale" ? (toF(txFinalPrice)>0?toF(txFinalPrice):cardsSaleSum) : 0;
 
               const methods     = txPaymentMethods;
-              const amtKey      = {cash:"txCashAmt",venmo:"txVenmoAmount",zelle:"txZelleAmount"};
-              const dirState    = {cash:txCashDir, venmo:txVenmoDir, zelle:txZelleDir};
-              const valState    = {cash:txCashAmt, venmo:txVenmoAmount, zelle:txZelleAmount};
-              const color       = {cash:"#4ade80",venmo:"#60a5fa",zelle:"#c084fc"};
-              const icon        = {cash:"💵",venmo:"💙",zelle:"💜"};
-              const setDir      = {cash:setTxCashDir,venmo:setTxVenmoDir,zelle:setTxZelleDir};
-              const setAmt      = {cash:setTxCashAmt,venmo:setTxVenmoAmount,zelle:setTxZelleAmount};
+              const amtKey      = {cash:"txCashAmt",venmo:"txVenmoAmount",zelle:"txZelleAmount",binder:"txBinderAmount"};
+              const dirState    = {cash:txCashDir, venmo:txVenmoDir, zelle:txZelleDir, binder:txBinderDir};
+              const valState    = {cash:txCashAmt, venmo:txVenmoAmount, zelle:txZelleAmount, binder:txBinderAmount};
+              const color       = {cash:"#4ade80",venmo:"#60a5fa",zelle:"#c084fc",binder:"#f5a623"};
+              const icon        = {cash:"💵",venmo:"💙",zelle:"💜",binder:"📖"};
+              const setDir      = {cash:setTxCashDir,venmo:setTxVenmoDir,zelle:setTxZelleDir,binder:setTxBinderDir};
+              const setAmt      = {cash:setTxCashAmt,venmo:setTxVenmoAmount,zelle:setTxZelleAmount,binder:setTxBinderAmount};
 
               // Compute auto amount per empty slot
               let autoAmt = null, autoDir = "in";
@@ -3285,18 +3874,22 @@ export default function App() {
               const vo  = methods.includes("venmo") ? (txVenmoDir==="out"?toF(txVenmoAmount):0) : 0;
               const zi  = methods.includes("zelle") ? (txZelleDir==="in"?toF(txZelleAmount):0) : 0;
               const zo  = methods.includes("zelle") ? (txZelleDir==="out"?toF(txZelleAmount):0) : 0;
-              const totalIn=ci+vi+zi, totalOut=co+vo+zo;
+              const bRaw = methods.includes("binder") ? toF(txBinderAmount) : 0;
+              const bi  = txBinderDir==="in"  ? bRaw : 0;
+              const bo  = txBinderDir==="out" ? bRaw : 0;
+              const totalIn=ci+vi+zi+bi, totalOut=co+vo+zo+bo;
 
               return (
                 <>
                   {/* Method toggles */}
-                  <div style={{display:"flex",gap:6,marginBottom:methods.length?10:0}}>
-                    {[["cash","💵 Cash"],["venmo","💙 Venmo"],["zelle","💜 Zelle"]].map(([m,label])=>{
+                  <div style={{display:"flex",gap:6,marginBottom:methods.length?10:0,flexWrap:"wrap"}}>
+                    {[["cash","💵 Cash"],["venmo","💙 Venmo"],["zelle","💜 Zelle"],["binder","📖 Binder"]]
+                     .map(([m,label])=>{
                       const sel = methods.includes(m);
                       return (
                         <button key={m} type="button"
                           onClick={()=>setTxPaymentMethods(prev=>sel?prev.filter(x=>x!==m):[...prev,m])}
-                          style={{flex:1,padding:"8px 6px",borderRadius:3,cursor:"pointer",
+                          style={{flex:1,minWidth:80,padding:"8px 6px",borderRadius:3,cursor:"pointer",
                             fontFamily:"'Space Mono',monospace",fontSize:11,transition:"all 0.15s",
                             background:sel?color[m]+"22":"transparent",color:sel?color[m]:"#555",
                             border:`1px solid ${sel?color[m]+"55":"#252535"}`}}>
@@ -3323,6 +3916,11 @@ export default function App() {
                         placeholder={showAutoFor(m)?`auto ${autoAmt.toFixed(2)}`:"amount"}
                         style={{flex:1,padding:"3px 8px",fontSize:12,
                           borderColor:valState[m]?"":color[m]+"33"}}/>
+                      {m==="binder"&&valState[m]&&(
+                        <span style={{fontSize:10,color:"#f5a623",fontFamily:"'Space Mono',monospace",flexShrink:0}}>
+                          → binder credit
+                        </span>
+                      )}
                       {showAutoFor(m)&&(
                         <button type="button" onClick={()=>setAmt[m](autoAmt.toFixed(2))}
                           style={{padding:"2px 8px",borderRadius:3,fontSize:10,cursor:"pointer",flexShrink:0,
@@ -3338,6 +3936,8 @@ export default function App() {
                   {(totalIn>0||totalOut>0)&&(
                     <div style={{marginTop:4,padding:"6px 10px",background:"#0a0a12",border:"1px solid #1e1e28",borderRadius:3,display:"flex",gap:16,fontSize:11,flexWrap:"wrap"}}>
                       {totalIn>0&&<span style={{color:"#4ade80"}}>In: <strong>{fmt(totalIn)}</strong></span>}
+                      {bi>0&&<span style={{color:"#f5a623"}}>📖 {fmt(bi)} credit↓</span>}
+                      {bo>0&&<span style={{color:"#f5a623"}}>📖 {fmt(bo)} credit↑</span>}
                       {totalOut>0&&<span style={{color:"#f87171"}}>Out: <strong>{fmt(totalOut)}</strong></span>}
                       {totalIn>0&&totalOut>0&&<span style={{color:totalIn-totalOut>=0?"#4ade80":"#f87171"}}>Net: <strong>{totalIn-totalOut>=0?"+":""}{fmt(totalIn-totalOut)}</strong></span>}
                       {txType==="sale"&&saleRef>0&&totalIn>0&&Math.abs(totalIn-saleRef)>0.005&&(
@@ -3456,23 +4056,28 @@ export default function App() {
             <div><label style={{color:"#4ade80"}}>Cash Received ($)</label><input className="input" type="number" min="0" step="0.01" value={editTx.cashIn} onChange={e=>setEditTx(p=>({...p,cashIn:e.target.value}))}/></div>
             <div><label style={{color:"#f87171"}}>Cash Paid Out ($)</label><input className="input" type="number" min="0" step="0.01" value={editTx.cashOut} onChange={e=>setEditTx(p=>({...p,cashOut:e.target.value}))}/></div>
           </div>
-          <div className="grid2" style={{marginBottom:14}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
             <div>
-              <label style={{color:"#60a5fa"}}>💙 Venmo Amount ($)</label>
+              <label style={{color:"#60a5fa"}}>💙 Venmo ($)</label>
               <input className="input" type="number" step="0.01" value={editTx.venmoAmount||""} onChange={e=>setEditTx(p=>({...p,venmoAmount:e.target.value}))} placeholder="+ in / - out"/>
-              <div style={{fontSize:9,color:"#444",marginTop:3}}>Positive = received, negative = paid</div>
+              <div style={{fontSize:9,color:"#444",marginTop:3}}>+ received, - paid</div>
             </div>
             <div>
-              <label style={{color:"#c084fc"}}>💜 Zelle Amount ($)</label>
+              <label style={{color:"#c084fc"}}>💜 Zelle ($)</label>
               <input className="input" type="number" step="0.01" value={editTx.zelleAmount||""} onChange={e=>setEditTx(p=>({...p,zelleAmount:e.target.value}))} placeholder="+ in / - out"/>
-              <div style={{fontSize:9,color:"#444",marginTop:3}}>Positive = received, negative = paid</div>
+              <div style={{fontSize:9,color:"#444",marginTop:3}}>+ received, - paid</div>
+            </div>
+            <div>
+              <label style={{color:"#f5a623"}}>📖 Binder ($)</label>
+              <input className="input" type="number" step="0.01" value={editTx.binderAmount||""} onChange={e=>setEditTx(p=>({...p,binderAmount:e.target.value}))} placeholder="+ in / - out"/>
+              <div style={{fontSize:9,color:"#444",marginTop:3}}>+ received, - paid</div>
             </div>
           </div>
           {(()=>{
             const ci=toF(editTx.cashIn), co=toF(editTx.cashOut);
-            const v=toF(editTx.venmoAmount)||0, z=toF(editTx.zelleAmount)||0;
-            const totalIn  = ci + Math.max(0,v) + Math.max(0,z);
-            const totalOut = co + Math.max(0,-v) + Math.max(0,-z);
+            const v=toF(editTx.venmoAmount)||0, z=toF(editTx.zelleAmount)||0, b=toF(editTx.binderAmount)||0;
+            const totalIn  = ci + Math.max(0,v) + Math.max(0,z) + Math.max(0,b);
+            const totalOut = co + Math.max(0,-v) + Math.max(0,-z) + Math.max(0,-b);
             const mktO = editTx.cardsOut.reduce((s,c)=>{
               const inv=inventory.find(x=>x.id===c.id);
               return s+(inv?inv.buyPrice:(c.buyPrice||0));
