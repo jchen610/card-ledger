@@ -1262,12 +1262,17 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
         const totalNewValue = effectiveAdded.reduce((s, c) => s + c.unit_price * c.quantity, 0);
 
         const cashPortion   = parseFloat(costBasis) || 0;
+        const binderPortion = appliedBinderCredit;
+        const pmParts = [cashPortion > 0 ? 'cash' : null, binderPortion > 0 ? 'binder' : null].filter(Boolean).join(',') || 'binder';
+        // market_profit = market value of cards received minus what we paid (cash + binder)
+        const buyMarketProfit = totalNewValue - totalBasis;
         const txId = db.prepare(
-          `INSERT INTO transactions (type, date, cash_in, cash_out, notes, market_profit, payment_method)
-           VALUES (?,?,?,?,?,?,?)`
+          `INSERT INTO transactions (type, date, cash_in, cash_out, notes, market_profit, payment_method, binder_amount)
+           VALUES (?,?,?,?,?,?,?,?)`
         ).run('buy', txDate, 0, cashPortion,
-          notes || `Binder import: ${effectiveAdded.length} new card type(s)` + (appliedBinderCredit ? ` (+${appliedBinderCredit.toFixed(2)} binder credit)` : ''), 0,
-          cashPortion > 0 ? 'cash' : 'binder'
+          notes || `Binder import: ${effectiveAdded.length} new card type(s)` + (binderPortion ? ` (+${binderPortion.toFixed(2)} binder credit)` : ''),
+          buyMarketProfit, pmParts,
+          binderPortion > 0 ? -binderPortion : null
         ).lastInsertRowid;
 
         for (const card of effectiveAdded) {
@@ -1306,11 +1311,19 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
         const totalRemovedValue = effectiveRemoved.reduce((s, c) => s + c.unit_price * c.quantity, 0);
         const pmMethods = [cashProceeds > 0 ? 'cash' : null, binderProceeds > 0 ? 'binder' : null].filter(Boolean).join(',') || 'cash';
 
+        // Calculate market profit: total sale proceeds minus cost basis of removed cards
+        const removedCostBasis = effectiveRemoved.reduce((s, c) => {
+          const matchCards = db.prepare('SELECT buy_price FROM cards WHERE name=? AND status=? LIMIT ?')
+            .all(c.card_name, 'in_stock', c.quantity);
+          return s + matchCards.reduce((ss, mc) => ss + (mc.buy_price || 0), 0);
+        }, 0);
+        const saleMarketProfit = proceeds - removedCostBasis;
+
         const txId = db.prepare(
-          `INSERT INTO transactions (type, date, cash_in, cash_out, notes, payment_method, binder_amount)
-           VALUES (?,?,?,?,?,?,?)`
+          `INSERT INTO transactions (type, date, cash_in, cash_out, notes, market_profit, payment_method, binder_amount)
+           VALUES (?,?,?,?,?,?,?,?)`
         ).run('sale', txDate, cashProceeds, 0,
-          notes || `Binder removal: ${effectiveRemoved.length} card type(s)`, pmMethods,
+          notes || `Binder removal: ${effectiveRemoved.length} card type(s)`, saleMarketProfit, pmMethods,
           binderProceeds > 0 ? binderProceeds : null
         ).lastInsertRowid;
 
