@@ -603,7 +603,7 @@ function defaultOwners(profiles) {
   }));
 }
 
-function OwnershipSplit({ profiles, owners, onChange }) {
+function OwnershipSplit({ profiles, owners, onChange, defaults }) {
   const active = profiles.filter(p => !p.archived);
   if (!active.length) return null;
   const total = owners.reduce((s, o) => s + (parseFloat(o.percentage) || 0), 0);
@@ -622,9 +622,9 @@ function OwnershipSplit({ profiles, owners, onChange }) {
     const checkedIds = active
       .filter(pr => pr.id === p.id ? !wasChecked : isChecked(pr))
       .map(pr => pr.id);
-    // If none checked, restore default even split across all
+    // If none checked, restore defaults (equity defaults if provided, else even split)
     if (checkedIds.length === 0) {
-      onChange(defaultOwners(active));
+      onChange(defaults && defaults.length > 0 ? defaults : defaultOwners(active));
       return;
     }
     const each = parseFloat((100 / checkedIds.length).toFixed(2));
@@ -1058,18 +1058,6 @@ function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt
   const [owners,       setOwners]       = useState(() => getDefaultOwners());
   const fileRef = useRef();
 
-  function handleFile(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    setFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = ev => {
-      setCsvText(ev.target.result);
-      setPreview(null);
-    };
-    reader.readAsText(file);
-  }
-
   async function handlePreview(text) {
     const src = text || csvText;
     if (!src.trim()) { setErr('Please select a CSV file first.'); return; }
@@ -1126,7 +1114,8 @@ function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt
     return totalBasis > 0 && totalNewMkt > 0 ? totalBasis * (cardMkt / totalNewMkt) : null;
   }
   function getCardSale(c) {
-    const cardMkt = c.unit_price * (c.quantity || c.delta || 1);
+    const price = c.storedUnitPrice || c.unit_price;
+    const cardMkt = price * (c.quantity || c.delta || 1);
     return totalProceeds > 0 && totalRemovedMkt > 0 ? totalProceeds * (cardMkt / totalRemovedMkt) : null;
   }
 
@@ -1151,12 +1140,17 @@ function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt
       {/* Upload row */}
       <div className="panel" style={{padding:'14px 18px',marginBottom:16,display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
         <input ref={fileRef} type="file" accept=".csv,text/csv" style={{display:'none'}} onChange={e => {
-          handleFile(e);
-          if (e.target.files[0]) {
-            const reader = new FileReader();
-            reader.onload = ev => handlePreview(ev.target.result);
-            reader.readAsText(e.target.files[0]);
-          }
+          const file = e.target.files[0];
+          if (!file) return;
+          setFileName(file.name);
+          setPreview(null);
+          const reader = new FileReader();
+          reader.onload = ev => {
+            const text = ev.target.result;
+            setCsvText(text);
+            handlePreview(text);
+          };
+          reader.readAsText(file);
         }} />
         <button className="btn btn-primary" onClick={() => fileRef.current.click()} disabled={loading}>
           {loading ? '⏳ Analyzing…' : '📂 Choose CSV'}
@@ -1252,7 +1246,7 @@ function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt
               {profiles.filter(p=>!p.archived).length > 0 && (
                 <div>
                   <div style={{fontSize:10,color:'#555',letterSpacing:1,marginBottom:4,...mono}}>OWNERSHIP</div>
-                  <OwnershipSplit profiles={profiles.filter(p=>!p.archived)} owners={owners} onChange={setOwners} />
+                  <OwnershipSplit profiles={profiles.filter(p=>!p.archived)} owners={owners} onChange={setOwners} defaults={getDefaultOwners()} />
                 </div>
               )}
               {err && <div style={{color:'#f87171',fontSize:12}}>{err}</div>}
@@ -1494,7 +1488,7 @@ export default function App() {
   const [binderImporting,   setBinderImporting]   = useState(false);
   const [binderSearch,      setBinderSearch]      = useState('');
   const [binderPage,        setBinderPage]        = useState(0);
-  const [binderPP]                                = useState(50);
+  const [binderPP,          setBinderPP]          = useState(50);
 
   // Profiles management state
   const [profileDraft,    setProfileDraft]    = useState({ name:"", color:"#f5a623", initials:"" });
@@ -2330,6 +2324,7 @@ export default function App() {
         {/* ═══ BINDER ═══ */}
         {view === "binder" && (() => {
           const binderTotal    = binderCards.reduce((s, c) => s + c.unit_price * c.quantity, 0);
+          const binderCostTotal = binderCards.reduce((s, c) => s + (c.purchase_price || 0) * c.quantity, 0);
           const binderTotalQty = binderCards.reduce((s, c) => s + c.quantity, 0);
           const search         = binderSearch.toLowerCase();
           const filtered       = binderCards.filter(c =>
@@ -2359,7 +2354,8 @@ export default function App() {
                 {[
                   { label:'Unique Cards', value: binderCards.length },
                   { label:'Total Cards',  value: binderTotalQty },
-                  { label:'Total Value',  value: fmt(binderTotal) },
+                  { label:'Market Value', value: fmt(binderTotal) },
+                  { label:'Cost Basis',   value: binderCostTotal > 0 ? fmt(binderCostTotal) : '—' },
                   { label:'Imports',      value: binderImports.length },
                 ].map(s => (
                   <div key={s.label} className="panel" style={{padding:'12px 16px',textAlign:'center'}}>
@@ -2384,7 +2380,7 @@ export default function App() {
                         <th>Card</th><th>Set</th>
                         <th className="hide-sm">Number</th>
                         <th className="hide-sm">Rarity</th>
-                        <th>Qty</th><th>Unit Price</th><th>Total</th>
+                        <th>Qty</th><th>Unit Price</th><th>Purchase</th><th>Total</th>
                       </tr></thead>
                       <tbody>
                         {pageSlice.map(c => (
@@ -2397,12 +2393,13 @@ export default function App() {
                             </td>
                             <td style={{textAlign:'center',...mono,fontSize:12}}>{c.quantity}</td>
                             <td style={{textAlign:'right',...mono,fontSize:12,color:'#f5a623'}}>{fmt(c.unit_price)}</td>
+                            <td style={{textAlign:'right',...mono,fontSize:12,color:c.purchase_price?'#4ade80':'#333'}}>{c.purchase_price?fmt(c.purchase_price):'—'}</td>
                             <td style={{textAlign:'right',...mono,fontSize:12}}>{fmt(c.unit_price*c.quantity)}</td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
-                    <Paginator page={binderPage} setPage={setBinderPage} total={filtered.length} pp={binderPP} />
+                    <Paginator page={binderPage} onPage={setBinderPage} total={filtered.length} perPage={binderPP} onPerPage={setBinderPP} />
                   </>
                 )}
               </div>
@@ -3138,7 +3135,7 @@ export default function App() {
                 {label: activeProfiles.length===1 ? `${activeProfiles[0].name}'s Revenue`   : "Revenue",        val:fmt(stats.revenue),     color:"#4ade80"},
                 {label: activeProfiles.length===1 ? `${activeProfiles[0].name}'s Cost`      : "Cost of Sold",   val:fmt(stats.costOfSold),  color:"#f87171"},
                 {label: activeProfiles.length===1 ? `${activeProfiles[0].name}'s Profit`    : "Realized Profit",val:(stats.profit>=0?"+":"-")+fmt(stats.profit), color:stats.profit>=0?"#4ade80":"#f87171"},
-                {label:"Mkt Appreciation", val:(()=>{const t=visibleInStockCards.reduce((s,c)=>s+(c.currentMarket||0)*ownerPct(c,partnerFilters),0),p=visibleInStockCards.reduce((s,c)=>s+(c.marketAtPurchase||0)*ownerPct(c,partnerFilters),0),d=t-p;return(d>=0?"+":"-")+fmt(Math.abs(d));})(),
+                {label:"Unrealized Gain", val:(()=>{const t=visibleInStockCards.reduce((s,c)=>s+(c.currentMarket||0)*ownerPct(c,partnerFilters),0),p=visibleInStockCards.reduce((s,c)=>s+(c.marketAtPurchase||0)*ownerPct(c,partnerFilters),0),d=t-p;return(d>=0?"+":"-")+fmt(Math.abs(d));})(),
                   color:(()=>{const d=visibleInStockCards.reduce((s,c)=>s+(c.currentMarket||0)*ownerPct(c,partnerFilters),0)-visibleInStockCards.reduce((s,c)=>s+(c.marketAtPurchase||0)*ownerPct(c,partnerFilters),0);return d>=0?"#4ade80":"#f87171";})()},
               ].map(s=><div key={s.label} className="stat-card"><div className="stat-label">{s.label}</div><div className="stat-value" style={{color:s.color}}>{s.val}</div></div>)}
             </div>
@@ -3161,7 +3158,7 @@ export default function App() {
                   <span className={`pct-pill ${pillCls(stats.avgIntake)}`} style={{fontSize:14,padding:"3px 12px"}}>{pct(stats.avgIntake)}</span>
                   <div style={{fontSize:10,color:"#444",marginTop:4}}>Lower is better</div>
                 </div>
-                {(()=>{const cs=soldCards.filter(c=>c.salePrice&&c.currentMarket);if(!cs.length)return null;const avg=cs.reduce((s,c)=>s+(c.salePrice/c.currentMarket)*100,0)/cs.length;return(
+                {(()=>{const relevantSold=partnerFilters.length?soldCards.filter(c=>c.owners?.some(o=>partnerFilters.includes(o.profileId))):soldCards;const cs=relevantSold.filter(c=>c.salePrice&&c.currentMarket);if(!cs.length)return null;const avg=cs.reduce((s,c)=>s+(c.salePrice/c.currentMarket)*100,0)/cs.length;return(
                   <div>
                     <div style={{fontSize:11,color:"#aaa",marginBottom:6}}>Avg Sale % <span style={{color:"#555",fontSize:10}}>(sale / mkt @ sale)</span></div>
                     <span className={`pct-pill ${salePillCls(avg)}`} style={{fontSize:14,padding:"3px 12px"}}>{pct(avg)}</span>
@@ -3410,7 +3407,7 @@ export default function App() {
               return (
                 <>
                   <BuyPaymentUI payment={addCardPayment} onChange={setAddCardPayment} buyPrice={toF(newCard.buyPrice)} allowBinder/>
-                  <OwnershipSplit profiles={profiles} owners={addCardOwners} onChange={setAddCardOwners}/>
+                  <OwnershipSplit profiles={profiles} owners={addCardOwners} onChange={setAddCardOwners} defaults={getDefaultOwners()}/>
                   <div style={{marginTop:14}}>
                     <ImagePicker value={addCardImage} onChange={setAddCardImage} label="Transaction Photo (optional)"/>
                   </div>
@@ -3532,7 +3529,7 @@ export default function App() {
             return (
               <>
                 <BuyPaymentUI payment={batchPayment} onChange={setBatchPayment} buyPrice={effectiveBuyPrice} allowBinder/>
-                <OwnershipSplit profiles={profiles} owners={batchOwners} onChange={setBatchOwners}/>
+                <OwnershipSplit profiles={profiles} owners={batchOwners} onChange={setBatchOwners} defaults={getDefaultOwners()}/>
                 <div style={{marginTop:14}}>
                   <ImagePicker value={batchImage} onChange={setBatchImage} label="Transaction Photo (optional)"/>
                 </div>
@@ -3736,7 +3733,7 @@ export default function App() {
                 <div style={{marginBottom:8}}><PricingFields data={newTradeCard} onChange={setNewTradeCard}/></div>
                 <button className="btn btn-ghost" style={{width:"100%"}} onClick={handleAddTradeCard}>+ Add Card to Trade</button>
               </div>
-              <OwnershipSplit profiles={profiles} owners={txInOwners} onChange={handleSetTxInOwners}/>
+              <OwnershipSplit profiles={profiles} owners={txInOwners} onChange={handleSetTxInOwners} defaults={getDefaultOwners()}/>
             </div>
           )}
 
@@ -4031,7 +4028,8 @@ export default function App() {
                   </div>
                   <OwnershipSplit profiles={profiles}
                     owners={co.owners||[]}
-                    onChange={owners=>setEditTx(p=>({...p,cardsOut:p.cardsOut.map((c,j)=>j===i?{...c,owners}:c)}))}/>
+                    onChange={owners=>setEditTx(p=>({...p,cardsOut:p.cardsOut.map((c,j)=>j===i?{...c,owners}:c)}))}
+                    defaults={getDefaultOwners()}/>
                 </div>
               ))}
             </div>
@@ -4047,7 +4045,8 @@ export default function App() {
                   </div>
                   <OwnershipSplit profiles={profiles}
                     owners={ci.owners||[]}
-                    onChange={owners=>setEditTx(p=>({...p,cardsIn:p.cardsIn.map((c,j)=>j===i?{...c,owners}:c)}))}/>
+                    onChange={owners=>setEditTx(p=>({...p,cardsIn:p.cardsIn.map((c,j)=>j===i?{...c,owners}:c)}))}
+                    defaults={getDefaultOwners()}/>
                 </div>
               ))}
             </div>
@@ -4103,7 +4102,7 @@ export default function App() {
           <div style={{marginBottom:14}}><label>Card Name</label><input className="input" value={editCard.name} onChange={e=>setEditCard(p=>({...p,name:e.target.value}))}/></div>
           <div style={{marginBottom:14,padding:14,background:"#0c0c18",borderRadius:4,border:"1px solid #1a1a2e"}}><GradeFields data={editCard} onChange={setEditCard}/></div>
           <div style={{marginBottom:14}}><PricingFields data={{...editCard,currentMarketTouched:true}} onChange={d=>setEditCard(p=>({...p,...d}))}/></div>
-          <OwnershipSplit profiles={profiles} owners={editCardOwners} onChange={setEditCardOwners}/>
+          <OwnershipSplit profiles={profiles} owners={editCardOwners} onChange={setEditCardOwners} defaults={getDefaultOwners()}/>
           <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
             <button className="btn btn-ghost" onClick={()=>{ setEditCard(null); setEditCardOwners([]); }}>Cancel</button>
             <button className="btn btn-primary" onClick={handleSaveCard}>Save Changes</button>
@@ -4122,7 +4121,7 @@ export default function App() {
             <div><label>Mkt @ Sale ($)</label><input className="input" type="number" min="0" step="0.01" value={editSold.currentMarket} onChange={e=>setEditSold(p=>({...p,currentMarket:e.target.value}))}/></div>
           </div>
           <div style={{marginBottom:14}}><label>Sale Price ($)</label><input className="input" type="number" min="0" step="0.01" value={editSold.salePrice} onChange={e=>setEditSold(p=>({...p,salePrice:e.target.value}))}/></div>
-          <OwnershipSplit profiles={profiles} owners={editSoldOwners} onChange={setEditSoldOwners}/>
+          <OwnershipSplit profiles={profiles} owners={editSoldOwners} onChange={setEditSoldOwners} defaults={getDefaultOwners()}/>
           <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
             <button className="btn btn-ghost" onClick={()=>{ setEditSold(null); setEditSoldOwners([]); }}>Cancel</button>
             <button className="btn btn-primary" onClick={handleSaveSold}>Save Changes</button>

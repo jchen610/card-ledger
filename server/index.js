@@ -210,9 +210,9 @@ async function writeBackup(label) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const ts    = new Date().toISOString();
 
-  // 1. DB copy (rolling 10)
+  // 1. DB copy (rolling 10) — use VACUUM INTO so WAL data is included
   const dbDest = path.join(backupDir, `cardledger-${stamp}.db`);
-  fs.copyFileSync(dbPath, dbDest);
+  db.exec(`VACUUM INTO '${dbDest.replace(/\\/g, '/').replace(/'/g, "''")}'`);
 
   // Prune to 10 most recent .db backups
   const dbFiles = fs.readdirSync(backupDir)
@@ -355,6 +355,7 @@ try { db.exec(`ALTER TABLE transactions ADD COLUMN zelle_amount REAL`); } catch(
 try { db.exec(`ALTER TABLE cards ADD COLUMN image_url TEXT`); } catch(e) {}
 try { db.exec(`ALTER TABLE transactions ADD COLUMN binder_amount REAL`); } catch(e) {}
 try { db.exec(`ALTER TABLE transactions ADD COLUMN binder_credit_used INTEGER DEFAULT 0`); } catch(e) {}
+try { db.exec(`ALTER TABLE binder_inventory ADD COLUMN purchase_price REAL`); } catch(e) {}
 
 // Profiles / equity support
 db.exec(`
@@ -1173,13 +1174,13 @@ function computeBinderDiff(newCards) {
     } else if (card.quantity > existing.quantity) {
       qtyUp.push({ ...card, prevQuantity: existing.quantity, delta: card.quantity - existing.quantity, existingId: existing.id });
     } else if (card.quantity < existing.quantity) {
-      qtyDown.push({ ...card, prevQuantity: existing.quantity, delta: existing.quantity - card.quantity, existingId: existing.id });
+      qtyDown.push({ ...card, prevQuantity: existing.quantity, delta: existing.quantity - card.quantity, existingId: existing.id, storedUnitPrice: existing.unit_price });
     } else {
       unchanged.push({ ...card, existingId: existing.id });
     }
   }
   for (const [key, card] of currentMap.entries()) {
-    if (!newMap.has(key)) removed.push(card);
+    if (!newMap.has(key)) removed.push({ ...card, storedUnitPrice: card.unit_price });
   }
 
   return { added, removed, qtyUp, qtyDown, unchanged };
@@ -1201,8 +1202,8 @@ app.post('/api/binder/preview', (req, res) => {
     const diff = computeBinderDiff(newCards);
     const totalNewValue = diff.added.reduce((s, c) => s + c.unit_price * c.quantity, 0)
       + diff.qtyUp.reduce((s, c) => s + c.unit_price * c.delta, 0);
-    const totalRemovedValue = diff.removed.reduce((s, c) => s + c.unit_price * c.quantity, 0)
-      + diff.qtyDown.reduce((s, c) => s + c.unit_price * c.delta, 0);
+    const totalRemovedValue = diff.removed.reduce((s, c) => s + (c.storedUnitPrice || c.unit_price) * c.quantity, 0)
+      + diff.qtyDown.reduce((s, c) => s + (c.storedUnitPrice || c.unit_price) * c.delta, 0);
     // Unsettled binder credit — separate in (received) and out (paid) totals
     const binderIn  = db.prepare(`SELECT COALESCE(SUM(binder_amount), 0) as total FROM transactions WHERE binder_credit_used=0 AND binder_amount > 0`).get().total || 0;
     const binderOut = db.prepare(`SELECT COALESCE(SUM(binder_amount), 0) as total FROM transactions WHERE binder_credit_used=0 AND binder_amount < 0`).get().total || 0;
@@ -1234,13 +1235,38 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
     ];
 
     db.transaction(() => {
-      // ── Update binder_inventory ──────────────────────────────────────────────
-      for (const card of added) {
-        db.prepare(`INSERT INTO binder_inventory (card_name, set_name, set_number, rarity, unit_price, quantity, first_seen_at, last_seen_at)
-                    VALUES (?,?,?,?,?,?,?,?)`)
-          .run(card.card_name, card.set_name, card.set_number, card.rarity, card.unit_price, card.quantity, now, now);
+      // ── Settle binder credit balance ─────────────────────────────────────────
+      const appliedBinderCredit = parseFloat(req.body.binderCredit) || 0;
+      const appliedSaleBinder   = parseFloat(saleBinder) || 0;
+      if (appliedBinderCredit !== 0 || appliedSaleBinder !== 0) {
+        db.prepare(`UPDATE transactions SET binder_credit_used=1 WHERE binder_credit_used=0 AND binder_amount IS NOT NULL AND binder_amount != 0`).run();
       }
-      for (const card of [...qtyUp, ...qtyDown, ...unchanged]) {
+      const totalBasis = (parseFloat(costBasis) || 0) + appliedBinderCredit;
+
+      // ── Update binder_inventory ──────────────────────────────────────────────
+      // Compute per-unit purchase price for new cards (prorated from cost basis)
+      const totalNewValue = effectiveAdded.reduce((s, c) => s + c.unit_price * c.quantity, 0);
+      for (const card of added) {
+        const proportion = totalNewValue > 0 ? (card.unit_price * card.quantity) / totalNewValue : 1 / Math.max(effectiveAdded.length, 1);
+        const lotCost = totalBasis * proportion;
+        const purchasePrice = card.quantity > 0 ? lotCost / card.quantity : lotCost;
+        db.prepare(`INSERT INTO binder_inventory (card_name, set_name, set_number, rarity, unit_price, quantity, purchase_price, first_seen_at, last_seen_at)
+                    VALUES (?,?,?,?,?,?,?,?,?)`)
+          .run(card.card_name, card.set_name, card.set_number, card.rarity, card.unit_price, card.quantity, totalBasis > 0 ? purchasePrice : null, now, now);
+      }
+      for (const card of qtyUp) {
+        // Weighted average purchase price: existing cost + new prorated cost
+        const existing = db.prepare('SELECT purchase_price, quantity FROM binder_inventory WHERE id=?').get(card.existingId);
+        const oldPP = existing?.purchase_price || 0;
+        const oldQty = existing?.quantity || card.prevQuantity;
+        const proportion = totalNewValue > 0 ? (card.unit_price * card.delta) / totalNewValue : 1 / Math.max(effectiveAdded.length, 1);
+        const newLotCost = totalBasis * proportion;
+        const newPP = card.delta > 0 ? newLotCost / card.delta : 0;
+        const avgPP = totalBasis > 0 ? ((oldPP * oldQty) + (newPP * card.delta)) / card.quantity : oldPP;
+        db.prepare('UPDATE binder_inventory SET unit_price=?, quantity=?, purchase_price=?, last_seen_at=? WHERE id=?')
+          .run(card.unit_price, card.quantity, avgPP > 0 ? avgPP : existing?.purchase_price || null, now, card.existingId);
+      }
+      for (const card of [...qtyDown, ...unchanged]) {
         db.prepare('UPDATE binder_inventory SET unit_price=?, quantity=?, last_seen_at=? WHERE id=?')
           .run(card.unit_price, card.quantity, now, card.existingId);
       }
@@ -1248,18 +1274,9 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
         db.prepare('DELETE FROM binder_inventory WHERE id=?').run(card.id);
       }
 
-      // ── Settle binder credit balance ─────────────────────────────────────────
-      const appliedBinderCredit = parseFloat(req.body.binderCredit) || 0;
-      const appliedSaleBinder   = parseFloat(saleBinder) || 0;
-      if (appliedBinderCredit !== 0 || appliedSaleBinder !== 0) {
-        db.prepare(`UPDATE transactions SET binder_credit_used=1 WHERE binder_credit_used=0 AND binder_amount IS NOT NULL AND binder_amount != 0`).run();
-      }
-
       // ── Create BUY transaction for new cards ────────────────────────────────
-      const totalBasis = (parseFloat(costBasis) || 0) + appliedBinderCredit;
       if (totalBasis > 0 && effectiveAdded.length > 0) {
         const basis = totalBasis;
-        const totalNewValue = effectiveAdded.reduce((s, c) => s + c.unit_price * c.quantity, 0);
 
         const cashPortion   = parseFloat(costBasis) || 0;
         const binderPortion = appliedBinderCredit;
@@ -1308,7 +1325,7 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
       const totalSaleProceeds = cashProceeds + binderProceeds;
       if (totalSaleProceeds > 0 && effectiveRemoved.length > 0) {
         const proceeds = totalSaleProceeds;
-        const totalRemovedValue = effectiveRemoved.reduce((s, c) => s + c.unit_price * c.quantity, 0);
+        const totalRemovedValue = effectiveRemoved.reduce((s, c) => s + (c.storedUnitPrice || c.unit_price) * c.quantity, 0);
         const pmMethods = [cashProceeds > 0 ? 'cash' : null, binderProceeds > 0 ? 'binder' : null].filter(Boolean).join(',') || 'cash';
 
         // Calculate market profit: total sale proceeds minus cost basis of removed cards
@@ -1328,7 +1345,8 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
         ).lastInsertRowid;
 
         for (const card of effectiveRemoved) {
-          const proportion     = totalRemovedValue > 0 ? (card.unit_price * card.quantity) / totalRemovedValue : 1 / effectiveRemoved.length;
+          const storedPrice    = card.storedUnitPrice || card.unit_price;
+          const proportion     = totalRemovedValue > 0 ? (storedPrice * card.quantity) / totalRemovedValue : 1 / effectiveRemoved.length;
           const cardSaleTotal  = proceeds * proportion;
           const unitSalePrice  = card.quantity > 0 ? cardSaleTotal / card.quantity : cardSaleTotal;
 
