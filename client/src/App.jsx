@@ -1048,6 +1048,7 @@ function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt
   const [preview,      setPreview]      = useState(null);
   const [loading,      setLoading]      = useState(false);
   const [confirming,   setConfirming]   = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [err,          setErr]          = useState('');
   const [costBasis,    setCostBasis]    = useState('');
   const [binderCredit,    setBinderCredit]    = useState('');
@@ -1077,24 +1078,53 @@ function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt
     finally { setLoading(false); }
   }
 
-  async function handleConfirm() {
+  async function handleConfirm(overrides) {
     setConfirming(true); setErr('');
     try {
+      const body = {
+        csvText,
+        costBasis:    costBasis    ? parseFloat(costBasis)    : null,
+        binderCredit: binderCredit ? parseFloat(binderCredit) : null,
+        saleProceeds: saleProceeds ? parseFloat(saleProceeds) : null,
+        saleBinder:   saleBinder   ? parseFloat(saleBinder)   : null,
+        notes:        importNotes  || null,
+        date:         importDate,
+        owners:       owners.length > 0 ? owners : null,
+        ...(overrides || {}),
+      };
       const r = await fetch('/api/binder/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          csvText,
-          costBasis:    costBasis    ? parseFloat(costBasis)    : null,
-          binderCredit: binderCredit ? parseFloat(binderCredit) : null,
-          saleProceeds: saleProceeds ? parseFloat(saleProceeds) : null,
-          saleBinder:   saleBinder   ? parseFloat(saleBinder)   : null,
-          notes:        importNotes  || null,
-          date:         importDate,
-          owners:       owners.length > 0 ? owners : null,
-        }),
+        body: JSON.stringify(body),
       });
       const d = await r.json();
+
+      // Warning gate: removals present but no sale proceeds. Prompt the user
+      // to choose a disposition, then resubmit with the acknowledgement flag.
+      if (r.status === 409 && d.warning === 'removed_no_sale') {
+        const lines = (d.affectedInStockCards || []).map(c =>
+          `  • ${c.name}${c.set_name ? ` — ${c.set_name}` : ''}${c.set_number ? ` #${c.set_number}` : ''}`
+        ).join('\n');
+        const choice = window.prompt(
+          `⚠ ${d.removedBinderCount} card(s) are being removed from the binder but NO sale proceeds were entered.\n\n` +
+          `Affected in-stock cards that will be updated:\n${lines || '  (none matched by name)'}\n\n` +
+          `Type one of the following and press OK:\n` +
+          `  "removed" — mark cards as removed (lost / destroyed / gifted). No revenue recorded.\n` +
+          `  "sold"    — mark cards as sold at their current market price. No binder-sale transaction is created.\n` +
+          `  (cancel)  — abort the import.`,
+          'removed'
+        );
+        if (!choice) { setConfirming(false); return; }
+        const disp = choice.trim().toLowerCase();
+        if (disp !== 'removed' && disp !== 'sold') {
+          setErr('Invalid disposition — must be "removed" or "sold".');
+          setConfirming(false);
+          return;
+        }
+        // Retry with acknowledgement
+        return handleConfirm({ confirmRemovedNoSale: true, removedDisposition: disp });
+      }
+
       if (!r.ok) throw new Error(d.error || 'Import failed');
       onImported(d);
     } catch (e) { setErr(e.message); }
@@ -1250,7 +1280,7 @@ function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt
                 </div>
               )}
               {err && <div style={{color:'#f87171',fontSize:12}}>{err}</div>}
-              <button className="btn btn-primary" style={{marginTop:4}} onClick={handleConfirm} disabled={confirming}>
+              <button className="btn btn-primary" style={{marginTop:4}} onClick={() => setShowConfirmModal(true)} disabled={confirming}>
                 {confirming ? '⏳ Importing…' : '✓ Confirm Import'}
               </button>
             </div>
@@ -1372,6 +1402,40 @@ function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt
           )}
         </>
       )}
+
+      {showConfirmModal && preview && (
+        <div className="modal-overlay" onClick={()=>setShowConfirmModal(false)}>
+          <div className="modal" style={{maxWidth:520}} onClick={e=>e.stopPropagation()}>
+            <div style={{padding:'16px 20px',borderBottom:'1px solid #252535'}}>
+              <h3 style={{margin:0,fontSize:13,color:'#f5a623',letterSpacing:2,...mono}}>CONFIRM BINDER IMPORT</h3>
+            </div>
+            <div style={{padding:20,...mono,fontSize:12,color:'#e8e4d9'}}>
+              <div style={{color:'#888',marginBottom:14,fontSize:11}}>This will permanently update the binder. A pre-import backup will be created automatically.</div>
+              <table style={{width:'100%',borderCollapse:'collapse'}}>
+                <tbody>
+                  <tr><td style={{padding:'6px 0',color:'#888'}}>Date</td><td style={{textAlign:'right'}}>{importDate}</td></tr>
+                  <tr><td style={{padding:'6px 0',color:'#888'}}>Cards Added</td><td style={{textAlign:'right',color:'#4ade80'}}>+{effectiveAdded.reduce((s,c)=>s+(c.quantity||c.delta||0),0)}</td></tr>
+                  <tr><td style={{padding:'6px 0',color:'#888'}}>Cards Removed</td><td style={{textAlign:'right',color:'#f87171'}}>-{effectiveRemoved.reduce((s,c)=>s+(c.quantity||c.delta||0),0)}</td></tr>
+                  <tr><td style={{padding:'6px 0',color:'#888'}}>New Mkt Value</td><td style={{textAlign:'right',color:'#f5a623'}}>{fmt(totalNewMkt)}</td></tr>
+                  <tr><td style={{padding:'6px 0',color:'#888'}}>Removed Value</td><td style={{textAlign:'right',color:'#f5a623'}}>{fmt(totalRemovedMkt)}</td></tr>
+                  <tr><td style={{padding:'6px 0',color:'#888'}}>Cost Basis</td><td style={{textAlign:'right'}}>{fmt(totalBasis)}</td></tr>
+                  <tr><td style={{padding:'6px 0',color:'#888'}}>Sale Proceeds</td><td style={{textAlign:'right'}}>{fmt(totalProceeds)}</td></tr>
+                  {(parseFloat(binderCredit)>0 || parseFloat(saleBinder)>0) && (
+                    <tr><td style={{padding:'6px 0',color:'#888'}}>Binder Credit Δ</td><td style={{textAlign:'right',color:'#f5a623'}}>{(parseFloat(binderCredit)||0) - (parseFloat(saleBinder)||0) >= 0 ? '+' : ''}{fmt((parseFloat(binderCredit)||0) - (parseFloat(saleBinder)||0))}</td></tr>
+                  )}
+                  {importNotes && <tr><td style={{padding:'6px 0',color:'#888'}}>Notes</td><td style={{textAlign:'right',color:'#aaa',maxWidth:280,overflow:'hidden',textOverflow:'ellipsis'}}>{importNotes}</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            <div style={{padding:'12px 20px',borderTop:'1px solid #252535',display:'flex',justifyContent:'flex-end',gap:8}}>
+              <button className="btn btn-ghost" onClick={()=>setShowConfirmModal(false)} disabled={confirming}>Cancel</button>
+              <button className="btn btn-primary" onClick={async ()=>{ setShowConfirmModal(false); await handleConfirm(); }} disabled={confirming}>
+                {confirming ? '⏳ Importing…' : '✓ Apply'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1415,6 +1479,37 @@ export default function App() {
       alert('Backup failed: ' + e.message);
     } finally {
       setBackupWorking(false);
+    }
+  }
+
+  const [bulkRefreshing, setBulkRefreshing] = useState(false);
+  async function bulkRefreshFromBinder() {
+    if (!binderCards.length) { alert('No binder cards loaded.'); return; }
+    if (!window.confirm(
+      'Sync prices from the most recent binder import into all in-stock cards?\n\n' +
+      'Matching is tiered: (1) name + set + number, (2) name + set, (3) name alone only if unique in the binder.\n' +
+      'Cards with ambiguous matches (e.g. same name across multiple printings) are skipped, not overwritten.'
+    )) return;
+    setBulkRefreshing(true);
+    try {
+      const result = await api('/api/cards/bulk-sync-prices', { method:'POST' });
+      await reload();
+      const b = result.breakdown || {};
+      alert(
+        `Sync Prices complete:\n` +
+        `  ${result.updated} updated total\n` +
+        `    • ${b.exact || 0} exact (name + set + number)\n` +
+        `    • ${b.bySet || 0} by name + set\n` +
+        `    • ${b.byNameOnly || 0} by name alone (unique binder match)\n` +
+        `  ${b.unchanged || 0} already in sync\n` +
+        `  ${b.ambiguousSkipped || 0} skipped (ambiguous — multiple binder rows)\n` +
+        `  ${b.slabsSkipped || 0} slabs skipped (graded cards aren't synced from raw binder)\n` +
+        `  ${b.noMatch || 0} no match in binder`
+      );
+    } catch (e) {
+      alert('Sync Prices failed: ' + e.message);
+    } finally {
+      setBulkRefreshing(false);
     }
   }
 
@@ -1481,11 +1576,71 @@ export default function App() {
   const [detailCard,    setDetailCard]    = useState(null);
   const [detailTx,      setDetailTx]      = useState(null);
 
+  // ── Customizable keyboard shortcuts ─────────────────────────────────────────
+  const SHORTCUT_DEFS = [
+    { id: 'addCard',   label: 'New Card',         defaultKey: 'n' },
+    { id: 'batchBuy',  label: 'Batch Buy',        defaultKey: 'b' },
+    { id: 'newSale',   label: 'New Sale',         defaultKey: 's' },
+    { id: 'newTrade',  label: 'New Trade',        defaultKey: 't' },
+    { id: 'goStock',   label: 'Go to Stock',      defaultKey: '1' },
+    { id: 'goSold',    label: 'Go to Sold',       defaultKey: '2' },
+    { id: 'goTx',      label: 'Go to Tx',         defaultKey: '3' },
+    { id: 'goBinder',  label: 'Go to Binder',     defaultKey: '4' },
+    { id: 'goCosts',   label: 'Go to Costs',      defaultKey: '5' },
+    { id: 'closeAll',  label: 'Close Modals',     defaultKey: 'Escape' },
+  ];
+  const loadShortcuts = () => {
+    try {
+      const s = JSON.parse(localStorage.getItem('shortcutMap') || '{}');
+      const out = {};
+      SHORTCUT_DEFS.forEach(d => {
+        out[d.id] = s[d.id] || { key: d.defaultKey, enabled: true };
+      });
+      return out;
+    } catch { return Object.fromEntries(SHORTCUT_DEFS.map(d => [d.id, { key: d.defaultKey, enabled: true }])); }
+  };
+  const [shortcuts, setShortcuts] = useState(loadShortcuts);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [capturingId, setCapturingId] = useState(null);
+  useEffect(() => { localStorage.setItem('shortcutMap', JSON.stringify(shortcuts)); }, [shortcuts]);
+  useEffect(() => {
+    function handler(e) {
+      if (capturingId) return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const key = e.key;
+      const match = (id) => shortcuts[id]?.enabled && shortcuts[id]?.key?.toLowerCase() === key.toLowerCase();
+      if (match('addCard'))  { e.preventDefault(); setAddCardOwners(getDefaultOwners()); setShowAddCard(true); }
+      else if (match('batchBuy')) { e.preventDefault(); setBatchOwners(getDefaultOwners()); setShowBatch(true); }
+      else if (match('newSale'))  { e.preventDefault(); openTxModal('sale'); }
+      else if (match('newTrade')) { e.preventDefault(); openTxModal('trade'); }
+      else if (match('goStock'))  { e.preventDefault(); setView('in_stock'); }
+      else if (match('goSold'))   { e.preventDefault(); setView('sold'); }
+      else if (match('goTx'))     { e.preventDefault(); setView('transactions'); }
+      else if (match('goBinder')) { e.preventDefault(); setView('binder'); }
+      else if (match('goCosts'))  { e.preventDefault(); setView('costs'); }
+      else if (match('closeAll')) {
+        setShowAddCard(false); setShowBatch(false); setShowAddTx(false); setShowProfiles(false);
+        setEditTx(null); setEditCard(null); setEditSold(null); setDetailCard(null); setDetailTx(null);
+        setShowShortcuts(false); setCapturingId(null);
+      }
+    }
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [shortcuts, capturingId]);
+
+  // Table sort UI state
+  const [stockSort,     setStockSort]     = useState({ key:'name', dir:'asc' });
+  const [soldSort,      setSoldSort]      = useState({ key:'soldDate', dir:'desc' });
+  // Binder UI state
+  const [binderSort,    setBinderSort]    = useState({ key:'card_name', dir:'asc' });
+  const [binderDetail,  setBinderDetail]  = useState(null);
+  const [txTypeFilter,  setTxTypeFilter]  = useState('');
+  const [txPayFilter,   setTxPayFilter]   = useState('');
+  const [txPartnerFilter, setTxPartnerFilter] = useState('');
+
   // Binder state
-  const [showBinderImport,  setShowBinderImport]  = useState(false);
-  const [binderPreview,     setBinderPreview]     = useState(null);   // diff preview from server
-  const [binderCSVText,     setBinderCSVText]     = useState('');     // raw CSV text for confirm step
-  const [binderImporting,   setBinderImporting]   = useState(false);
   const [binderSearch,      setBinderSearch]      = useState('');
   const [binderPage,        setBinderPage]        = useState(0);
   const [binderPP,          setBinderPP]          = useState(50);
@@ -2176,7 +2331,7 @@ export default function App() {
             <span className="hero-logo" style={{fontFamily:"'Black Han Sans',sans-serif",fontSize:17,letterSpacing:3,color:"#f5a623"}}>CARDLEDGER</span>
           </div>
           <nav style={{display:"flex",overflowX:"auto",flex:1,minWidth:0}}>
-            {[{k:"in_stock",l:`Stock (${inStockCards.length})`},{k:"binder",l:`Binder (${binderCards.length})`},{k:"sold",l:`Sold (${soldCards.length})`},{k:"transactions",l:"Txns"},{k:"stats",l:"Analytics"},{k:"costs",l:"Costs"}].map(v => (
+            {[{k:"home",l:"Home"},{k:"in_stock",l:`Stock (${inStockCards.length})`},{k:"binder",l:`Binder (${binderCards.length})`},{k:"sold",l:`Sold (${soldCards.length})`},{k:"transactions",l:"Txns"},{k:"stats",l:"Analytics"},{k:"costs",l:"Costs"}].map(v => (
               <button key={v.k} className={`nav-btn ${view===v.k?"active":""}`} onClick={() => setView(v.k)}>{v.l}</button>
             ))}
             <button className="nav-btn" onClick={() => setShowProfiles(true)} style={{marginLeft:"auto",color:"#f5a623",flexShrink:0}}>
@@ -2321,6 +2476,97 @@ export default function App() {
           ))}
         </div>
 
+        {/* ═══ HOME / DASHBOARD ═══ */}
+        {view === "home" && (() => {
+          const mono = { fontFamily:"'Space Mono',monospace" };
+          const today = new Date().toISOString().slice(0,10);
+          const monthStart = today.slice(0,7);
+          const todayTx = transactions.filter(t => t.date === today);
+          const monthTx = transactions.filter(t => (t.date||'').startsWith(monthStart));
+          const flowOf = (arr) => arr.reduce((s,t)=>{
+            const v=t.venmoAmount||0, z=t.zelleAmount||0, b=t.binderAmount||0;
+            const inn=t.cashIn+Math.max(0,v)+Math.max(0,z)+Math.max(0,b);
+            const out=t.cashOut+Math.max(0,-v)+Math.max(0,-z)+Math.max(0,-b);
+            return s + (inn-out);
+          },0);
+          const profitOf = (arr) => arr.reduce((s,t)=>s+(t.marketProfit||0),0);
+          const todayNet  = flowOf(todayTx);
+          const monthNet  = flowOf(monthTx);
+          const todayProf = profitOf(todayTx);
+          const monthProf = profitOf(monthTx);
+          const binderMkt = binderCards.reduce((s,c)=>s+c.unit_price*c.quantity,0);
+          const binderCost = binderCards.reduce((s,c)=>s+(c.purchase_price||0)*c.quantity,0);
+          const binderGain = binderMkt - binderCost;
+          const recent = [...transactions].sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,5);
+          const Card = ({label,val,color,sub}) => (
+            <div className="stat-card">
+              <div className="stat-label">{label}</div>
+              <div style={{fontSize:18,fontWeight:700,color:color||'#e8e4d9',...mono}}>{val}</div>
+              {sub && <div style={{fontSize:9,color:'#555',marginTop:3}}>{sub}</div>}
+            </div>
+          );
+          return (
+            <div>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
+                <h2 className="section-title">DASHBOARD</h2>
+                <div style={{display:'flex',gap:8}}>
+                  <button className="btn btn-primary btn-sm" onClick={()=>{setAddCardOwners(getDefaultOwners());setShowAddCard(true);}}>+ Card</button>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>{setBatchOwners(getDefaultOwners());setShowBatch(true);}}>📦 Batch</button>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>openTxModal('sale')}>💰 Sale</button>
+                </div>
+              </div>
+
+              <div style={{fontSize:10,letterSpacing:2,color:'#666',marginBottom:6}}>TODAY · {today}</div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:18}}>
+                <Card label="Net Cashflow" val={(todayNet>=0?'+':'-')+fmt(Math.abs(todayNet))} color={todayNet>=0?'#4ade80':'#f87171'}/>
+                <Card label="Realized P/L" val={(todayProf>=0?'+':'-')+fmt(Math.abs(todayProf))} color={todayProf>=0?'#4ade80':'#f87171'}/>
+                <Card label="Transactions" val={todayTx.length}/>
+              </div>
+
+              <div style={{fontSize:10,letterSpacing:2,color:'#666',marginBottom:6}}>THIS MONTH · {monthStart}</div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:18}}>
+                <Card label="Net Cashflow" val={(monthNet>=0?'+':'-')+fmt(Math.abs(monthNet))} color={monthNet>=0?'#4ade80':'#f87171'}/>
+                <Card label="Realized P/L" val={(monthProf>=0?'+':'-')+fmt(Math.abs(monthProf))} color={monthProf>=0?'#4ade80':'#f87171'}/>
+                <Card label="Transactions" val={monthTx.length}/>
+              </div>
+
+              <div style={{fontSize:10,letterSpacing:2,color:'#666',marginBottom:6}}>HOLDINGS</div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:18}}>
+                <Card label="In Stock" val={inStockCards.length+' cards'} sub={fmt(stats.mktVal)+' mkt'}/>
+                <Card label="Binder Mkt" val={fmt(binderMkt)} sub={binderCards.length+' uniques'}/>
+                <Card label="Binder Cost" val={binderCost>0?fmt(binderCost):'—'}/>
+                <Card label="Binder P/L" val={binderCost>0?((binderGain>=0?'+':'-')+fmt(Math.abs(binderGain))):'—'} color={binderCost>0?(binderGain>=0?'#4ade80':'#f87171'):'#666'}/>
+              </div>
+
+              <div style={{fontSize:10,letterSpacing:2,color:'#666',marginBottom:6}}>RECENT TRANSACTIONS</div>
+              <div className="panel" style={{padding:0}}>
+                {recent.length === 0 ? (
+                  <div className="empty">No transactions yet.</div>
+                ) : (
+                  <table>
+                    <thead><tr><th>Date</th><th>Type</th><th>Partner</th><th style={{textAlign:'right'}}>Net</th><th style={{textAlign:'right'}}>P/L</th></tr></thead>
+                    <tbody>
+                      {recent.map(t => {
+                        const v=t.venmoAmount||0, z=t.zelleAmount||0, b=t.binderAmount||0;
+                        const net = (t.cashIn+Math.max(0,v)+Math.max(0,z)+Math.max(0,b))-(t.cashOut+Math.max(0,-v)+Math.max(0,-z)+Math.max(0,-b));
+                        return (
+                          <tr key={t.id} style={{cursor:'pointer'}} onClick={()=>setDetailTx(t)}>
+                            <td style={{fontSize:11,...mono,color:'#888'}}>{t.date}</td>
+                            <td style={{fontSize:11,color:'#aaa'}}>{t.type}</td>
+                            <td style={{fontSize:11,color:'#888'}}>{t.counterparty||'—'}</td>
+                            <td style={{textAlign:'right',...mono,fontSize:11,color:net>=0?'#4ade80':'#f87171'}}>{net>=0?'+':'-'}{fmt(Math.abs(net))}</td>
+                            <td style={{textAlign:'right',...mono,fontSize:11,color:(t.marketProfit||0)>=0?'#4ade80':'#f87171'}}>{t.marketProfit!=null?((t.marketProfit>=0?'+':'-')+fmt(Math.abs(t.marketProfit))):'—'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
         {/* ═══ BINDER ═══ */}
         {view === "binder" && (() => {
           const binderTotal    = binderCards.reduce((s, c) => s + c.unit_price * c.quantity, 0);
@@ -2333,8 +2579,41 @@ export default function App() {
               || (c.rarity    || '').toLowerCase().includes(search)
               || (c.set_number|| '').toLowerCase().includes(search)
           );
-          const pageSlice = filtered.slice(binderPage * binderPP, (binderPage + 1) * binderPP);
+          const sorted = [...filtered].sort((a, b) => {
+            const k = binderSort.key;
+            let av, bv;
+            if (k === 'total') { av = a.unit_price * a.quantity; bv = b.unit_price * b.quantity; }
+            else if (k === 'gain') {
+              av = (a.unit_price - (a.purchase_price || 0)) * a.quantity;
+              bv = (b.unit_price - (b.purchase_price || 0)) * b.quantity;
+            }
+            else { av = a[k]; bv = b[k]; }
+            if (av == null) av = '';
+            if (bv == null) bv = '';
+            if (typeof av === 'string') return binderSort.dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+            return binderSort.dir === 'asc' ? av - bv : bv - av;
+          });
+          const pageSlice = sorted.slice(binderPage * binderPP, (binderPage + 1) * binderPP);
           const mono = { fontFamily:"'Space Mono',monospace" };
+          const sortClick = (k) => setBinderSort(s => ({ key: k, dir: s.key === k && s.dir === 'asc' ? 'desc' : 'asc' }));
+          const sortArrow = (k) => binderSort.key === k ? (binderSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+          const exportBinderCSV = () => {
+            const rows = [['Card','Set','Number','Rarity','Qty','UnitPrice','Purchase','Total','Gain']];
+            sorted.forEach(c => {
+              const total = c.unit_price * c.quantity;
+              const gain = (c.unit_price - (c.purchase_price || 0)) * c.quantity;
+              rows.push([c.card_name, c.set_name||'', c.set_number||'', c.rarity||'', c.quantity, c.unit_price, c.purchase_price||'', total.toFixed(2), gain.toFixed(2)]);
+            });
+            const csv = rows.map(r => r.map(v => {
+              const s = String(v);
+              return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+            }).join(',')).join('\n');
+            const blob = new Blob([csv], { type:'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = `binder-${new Date().toISOString().slice(0,10)}.csv`;
+            a.click(); URL.revokeObjectURL(url);
+          };
           return (
             <div>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14,flexWrap:'wrap',gap:8}}>
@@ -2343,6 +2622,9 @@ export default function App() {
                   <input className="input" style={{width:200,maxWidth:'100%',fontSize:11,padding:'6px 10px'}}
                     placeholder="Search binder..." value={binderSearch}
                     onChange={e => { setBinderSearch(e.target.value); setBinderPage(0); }} />
+                  <button className="btn btn-export btn-sm-wide" onClick={exportBinderCSV} disabled={sorted.length===0}>
+                    ⬇ Export CSV
+                  </button>
                   <button className="btn btn-primary btn-sm-wide" onClick={() => setView('binder_staging')}>
                     📥 Import CSV
                   </button>
@@ -2377,14 +2659,22 @@ export default function App() {
                   <>
                     <table>
                       <thead><tr>
-                        <th>Card</th><th>Set</th>
-                        <th className="hide-sm">Number</th>
-                        <th className="hide-sm">Rarity</th>
-                        <th>Qty</th><th>Unit Price</th><th>Purchase</th><th>Total</th>
+                        <th style={{cursor:'pointer'}} onClick={()=>sortClick('card_name')}>Card{sortArrow('card_name')}</th>
+                        <th style={{cursor:'pointer'}} onClick={()=>sortClick('set_name')}>Set{sortArrow('set_name')}</th>
+                        <th className="hide-sm" style={{cursor:'pointer'}} onClick={()=>sortClick('set_number')}>Number{sortArrow('set_number')}</th>
+                        <th className="hide-sm" style={{cursor:'pointer'}} onClick={()=>sortClick('rarity')}>Rarity{sortArrow('rarity')}</th>
+                        <th style={{cursor:'pointer'}} onClick={()=>sortClick('quantity')}>Qty{sortArrow('quantity')}</th>
+                        <th style={{cursor:'pointer'}} onClick={()=>sortClick('unit_price')}>Unit Price{sortArrow('unit_price')}</th>
+                        <th className="hide-sm" style={{cursor:'pointer'}} onClick={()=>sortClick('purchase_price')}>Purchase{sortArrow('purchase_price')}</th>
+                        <th style={{cursor:'pointer'}} onClick={()=>sortClick('total')}>Total{sortArrow('total')}</th>
+                        <th className="hide-sm" style={{cursor:'pointer'}} onClick={()=>sortClick('gain')}>P/L{sortArrow('gain')}</th>
                       </tr></thead>
                       <tbody>
-                        {pageSlice.map(c => (
-                          <tr key={c.id}>
+                        {pageSlice.map(c => {
+                          const gain = (c.unit_price - (c.purchase_price || 0)) * c.quantity;
+                          const hasCost = !!c.purchase_price;
+                          return (
+                          <tr key={c.id} style={{cursor:'pointer'}} onClick={()=>setBinderDetail(c)}>
                             <td><span style={{fontWeight:600}}>{c.card_name}</span></td>
                             <td style={{fontSize:11,color:'#888',maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c.set_name}</td>
                             <td className="hide-sm" style={{textAlign:'center',color:'#555',fontSize:11}}>{c.set_number}</td>
@@ -2393,10 +2683,14 @@ export default function App() {
                             </td>
                             <td style={{textAlign:'center',...mono,fontSize:12}}>{c.quantity}</td>
                             <td style={{textAlign:'right',...mono,fontSize:12,color:'#f5a623'}}>{fmt(c.unit_price)}</td>
-                            <td style={{textAlign:'right',...mono,fontSize:12,color:c.purchase_price?'#4ade80':'#333'}}>{c.purchase_price?fmt(c.purchase_price):'—'}</td>
+                            <td className="hide-sm" style={{textAlign:'right',...mono,fontSize:12,color:c.purchase_price?'#4ade80':'#333'}}>{c.purchase_price?fmt(c.purchase_price):'—'}</td>
                             <td style={{textAlign:'right',...mono,fontSize:12}}>{fmt(c.unit_price*c.quantity)}</td>
+                            <td className="hide-sm" style={{textAlign:'right',...mono,fontSize:12,color:!hasCost?'#333':(gain>=0?'#4ade80':'#f87171')}}>
+                              {hasCost ? (gain>=0?'+':'-')+fmt(Math.abs(gain)) : '—'}
+                            </td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                     <Paginator page={binderPage} onPage={setBinderPage} total={filtered.length} perPage={binderPP} onPerPage={setBinderPP} />
@@ -2467,6 +2761,11 @@ export default function App() {
                   <button className="btn btn-ghost btn-sm-wide" onClick={() => { setBatchOwners(getDefaultOwners()); setShowBatch(true); }}>📦 Batch Buy</button>
                   <button className="btn btn-ghost btn-sm-wide" onClick={() => openTxModal("sale")}>💰 Sale</button>
                   <button className="btn btn-ghost btn-sm-wide" onClick={() => openTxModal("trade")}>⇄ Trade</button>
+                  {binderCards.length > 0 && (
+                    <button className="btn btn-ghost btn-sm-wide" onClick={bulkRefreshFromBinder} disabled={bulkRefreshing} title="Update Current Market from binder unit prices (matches by card name)">
+                      {bulkRefreshing ? '⏳ Refreshing…' : '↻ Sync Prices'}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -2477,19 +2776,49 @@ export default function App() {
                 <>
                 <table>
                   <thead><tr>
-                    <th>Card</th><th className="hide-sm">Grade / Condition</th><th>Buy</th>
-                    <th>Mkt @ 🛒</th><th>Current Mkt</th><th className="hide-sm">Mkt Δ</th>
-                    <th>Intake %</th><th className="hide-sm">Unrealized</th><th></th>
+                    {(() => {
+                      const sk = stockSort.key, sd = stockSort.dir;
+                      const arr = (k) => sk===k ? (sd==='asc'?' ▲':' ▼') : '';
+                      const onClk = (k) => () => setStockSort(s => ({ key:k, dir: s.key===k && s.dir==='asc' ? 'desc' : 'asc' }));
+                      return (<>
+                        <th style={{cursor:'pointer'}} onClick={onClk('name')}>Card{arr('name')}</th>
+                        <th className="hide-sm">Grade / Condition</th>
+                        <th style={{cursor:'pointer'}} onClick={onClk('buyPrice')}>Buy{arr('buyPrice')}</th>
+                        <th style={{cursor:'pointer'}} onClick={onClk('marketAtPurchase')}>Mkt @ 🛒{arr('marketAtPurchase')}</th>
+                        <th style={{cursor:'pointer'}} onClick={onClk('currentMarket')}>Current Mkt{arr('currentMarket')}</th>
+                        <th className="hide-sm">Mkt Δ</th>
+                        <th style={{cursor:'pointer'}} onClick={onClk('intake')}>Intake %{arr('intake')}</th>
+                        <th className="hide-sm" style={{cursor:'pointer'}} onClick={onClk('gain')}>Unrealized{arr('gain')}</th>
+                        <th></th>
+                      </>);
+                    })()}
                   </tr></thead>
                   <tbody>
-                    {visibleInStockCards.slice(stockPage*stockPP, (stockPage+1)*stockPP).map(card => {
+                    {(() => {
+                      const sorted = [...visibleInStockCards].sort((a,b) => {
+                        const k = stockSort.key;
+                        let av, bv;
+                        if (k==='intake') {
+                          av = a.marketAtPurchase>0 ? a.buyPrice/a.marketAtPurchase : 0;
+                          bv = b.marketAtPurchase>0 ? b.buyPrice/b.marketAtPurchase : 0;
+                        } else if (k==='gain') {
+                          av = ((a.currentMarket||0)-a.buyPrice);
+                          bv = ((b.currentMarket||0)-b.buyPrice);
+                        } else { av = a[k]; bv = b[k]; }
+                        if (av==null) av='';
+                        if (bv==null) bv='';
+                        if (typeof av==='string') return stockSort.dir==='asc'?av.localeCompare(bv):bv.localeCompare(av);
+                        return stockSort.dir==='asc'?av-bv:bv-av;
+                      });
+                      return sorted.slice(stockPage*stockPP, (stockPage+1)*stockPP).map(card => {
                       const ip   = card.marketAtPurchase>0 ? (card.buyPrice/card.marketAtPurchase)*100 : null;
                       const pf   = ownerPct(card, partnerFilters);
                       const gain = ((card.currentMarket||0)-card.buyPrice)*pf;
                       const mktD = card.marketAtPurchase&&card.currentMarket
                         ? ((card.currentMarket-card.marketAtPurchase)/card.marketAtPurchase)*100 : null;
+                      const ipBg = ip==null ? '' : ip<75 ? 'rgba(74,222,128,0.05)' : ip<90 ? 'rgba(251,191,36,0.05)' : 'rgba(248,113,113,0.06)';
                       return (
-                        <tr key={card.id}>
+                        <tr key={card.id} style={{background:ipBg}}>
                           <td>
                             <div style={{fontWeight:700,fontSize:14,cursor:"pointer"}}
                               onClick={() => setDetailCard(card)}>{toTitleCase(card.name)}</div>
@@ -2558,7 +2887,8 @@ export default function App() {
                           </td>
                         </tr>
                       );
-                    })}
+                    });
+                    })()}
                   </tbody>
                   <tfoot>
                     <tr>
@@ -2652,12 +2982,45 @@ export default function App() {
                   <>
                   <table>
                     <thead><tr>
-                      <th>Card</th><th>Grade</th><th>Status</th>
-                      <th>Buy</th><th>Mkt @ Purchase</th><th>Mkt @ Sale</th>
-                      <th>Intake %</th><th>Sale Price</th><th>Sale %</th><th>Profit</th><th></th>
+                      {(() => {
+                        const sk = soldSort.key, sd = soldSort.dir;
+                        const arr = (k) => sk===k ? (sd==='asc'?' ▲':' ▼') : '';
+                        const onClk = (k) => () => setSoldSort(s => ({ key:k, dir: s.key===k && s.dir==='asc' ? 'desc' : 'asc' }));
+                        return (<>
+                          <th style={{cursor:'pointer'}} onClick={onClk('name')}>Card{arr('name')}</th>
+                          <th>Grade</th><th>Status</th>
+                          <th style={{cursor:'pointer'}} onClick={onClk('buyPrice')}>Buy{arr('buyPrice')}</th>
+                          <th style={{cursor:'pointer'}} onClick={onClk('marketAtPurchase')}>Mkt @ Purchase{arr('marketAtPurchase')}</th>
+                          <th style={{cursor:'pointer'}} onClick={onClk('currentMarket')}>Mkt @ Sale{arr('currentMarket')}</th>
+                          <th style={{cursor:'pointer'}} onClick={onClk('intake')}>Intake %{arr('intake')}</th>
+                          <th style={{cursor:'pointer'}} onClick={onClk('salePrice')}>Sale Price{arr('salePrice')}</th>
+                          <th style={{cursor:'pointer'}} onClick={onClk('salePct')}>Sale %{arr('salePct')}</th>
+                          <th style={{cursor:'pointer'}} onClick={onClk('profit')}>Profit{arr('profit')}</th>
+                          <th></th>
+                        </>);
+                      })()}
                     </tr></thead>
                     <tbody>
-                      {searchedSoldCards.slice(soldPage*soldPP, (soldPage+1)*soldPP).map(card => {
+                      {(() => {
+                        const sortedSold = [...searchedSoldCards].sort((a,b) => {
+                          const k = soldSort.key;
+                          let av,bv;
+                          if (k==='intake') {
+                            av = a.marketAtPurchase>0?a.buyPrice/a.marketAtPurchase:0;
+                            bv = b.marketAtPurchase>0?b.buyPrice/b.marketAtPurchase:0;
+                          } else if (k==='salePct') {
+                            av = a.salePrice!=null&&a.currentMarket>0?a.salePrice/a.currentMarket:0;
+                            bv = b.salePrice!=null&&b.currentMarket>0?b.salePrice/b.currentMarket:0;
+                          } else if (k==='profit') {
+                            av = a.salePrice!=null?a.salePrice-a.buyPrice:0;
+                            bv = b.salePrice!=null?b.salePrice-b.buyPrice:0;
+                          } else { av = a[k]; bv = b[k]; }
+                          if (av==null) av='';
+                          if (bv==null) bv='';
+                          if (typeof av==='string') return soldSort.dir==='asc'?av.localeCompare(bv):bv.localeCompare(av);
+                          return soldSort.dir==='asc'?av-bv:bv-av;
+                        });
+                        return sortedSold.slice(soldPage*soldPP, (soldPage+1)*soldPP).map(card => {
                         const ip = card.marketAtPurchase>0 ? (card.buyPrice/card.marketAtPurchase)*100 : null;
                         const sp = card.salePrice!=null&&card.currentMarket>0 ? (card.salePrice/card.currentMarket)*100 : null;
                         const pf = ownerPct(card, partnerFilters);
@@ -2697,7 +3060,8 @@ export default function App() {
                             <td><button className="edit-btn" onClick={() => { setEditSold({...card,buyPrice:String(card.buyPrice),marketAtPurchase:String(card.marketAtPurchase),currentMarket:String(card.currentMarket),salePrice:String(card.salePrice??'')}); setEditSoldOwners(card.owners||[]); }}>✎</button></td>
                           </tr>
                         );
-                      })}
+                      });
+                      })()}
                     </tbody>
                     <tfoot>
                       <tr>
@@ -2728,7 +3092,7 @@ export default function App() {
             ? [...transactions].reverse()
             : [...transactions].filter(t=>t.date===txDateFilter).reverse();
           // Partner filter: show only transactions involving any selected partner's cards
-          const filteredTx = partnerFilters.length
+          let filteredTx = partnerFilters.length
             ? allFilteredTx.filter(t =>
                 t.cardsOut.some(co => {
                   const inv = inventory.find(c => c.id === co.id);
@@ -2737,6 +3101,15 @@ export default function App() {
                 inventory.some(c => c.transactionId === t.id && c.owners?.some(o => partnerFilters.includes(o.profileId)))
               )
             : allFilteredTx;
+          if (txTypeFilter) filteredTx = filteredTx.filter(t => (t.type||'').toLowerCase() === txTypeFilter);
+          if (txPayFilter) filteredTx = filteredTx.filter(t => {
+            if (txPayFilter==='cash')   return t.cashIn>0 || t.cashOut>0;
+            if (txPayFilter==='venmo')  return (t.venmoAmount||0) !== 0;
+            if (txPayFilter==='zelle')  return (t.zelleAmount||0) !== 0;
+            if (txPayFilter==='binder') return (t.binderAmount||0) !== 0;
+            return true;
+          });
+          if (txPartnerFilter) filteredTx = filteredTx.filter(t => (t.counterparty||'').toLowerCase().includes(txPartnerFilter.toLowerCase()));
           const dayCashIn    = filteredTx.reduce((s,t)=>s+t.cashIn,0);
           const dayCashOut   = filteredTx.reduce((s,t)=>s+t.cashOut,0);
           const dayVenmoIn   = filteredTx.reduce((s,t)=>s+Math.max(0,t.venmoAmount||0),0);
@@ -2778,6 +3151,27 @@ export default function App() {
                   <button className="btn btn-ghost" onClick={()=>openTxModal("sale")}>💰 Sale</button>
                   <button className="btn btn-ghost" onClick={()=>openTxModal("trade")}>⇄ Trade</button>
                 </div>
+              </div>
+
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12,alignItems:"center"}}>
+                <select className="select" value={txTypeFilter} onChange={e=>setTxTypeFilter(e.target.value)} style={{width:'auto',padding:'4px 8px',fontSize:11}}>
+                  <option value="">All Types</option>
+                  <option value="sale">Sale</option>
+                  <option value="buy">Buy</option>
+                  <option value="trade">Trade</option>
+                </select>
+                <select className="select" value={txPayFilter} onChange={e=>setTxPayFilter(e.target.value)} style={{width:'auto',padding:'4px 8px',fontSize:11}}>
+                  <option value="">Any Payment</option>
+                  <option value="cash">Cash</option>
+                  <option value="venmo">Venmo</option>
+                  <option value="zelle">Zelle</option>
+                  <option value="binder">Binder</option>
+                </select>
+                <input className="input" placeholder="Partner..." value={txPartnerFilter} onChange={e=>setTxPartnerFilter(e.target.value)}
+                  style={{width:140,padding:'4px 8px',fontSize:11}}/>
+                {(txTypeFilter||txPayFilter||txPartnerFilter) && (
+                  <button className="btn btn-ghost btn-sm" onClick={()=>{setTxTypeFilter('');setTxPayFilter('');setTxPartnerFilter('');}}>clear</button>
+                )}
               </div>
 
               {txFilterMode==="day" && txDates.length>0 && (
@@ -4314,6 +4708,111 @@ export default function App() {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </ModalShell>
+      )}
+
+      {binderDetail && (() => {
+        const c = binderDetail;
+        const total = c.unit_price * c.quantity;
+        const cost = (c.purchase_price || 0) * c.quantity;
+        const gain = total - cost;
+        const hasCost = !!c.purchase_price;
+        return (
+          <ModalShell title="BINDER CARD" onClose={()=>setBinderDetail(null)}>
+            <div style={{padding:20,fontFamily:"'Space Mono',monospace"}}>
+              <div style={{fontSize:18,color:'#f5a623',fontWeight:700,marginBottom:4}}>{c.card_name}</div>
+              <div style={{fontSize:11,color:'#888',marginBottom:16}}>{c.set_name} {c.set_number ? '· #'+c.set_number : ''} {c.rarity ? '· '+c.rarity : ''}</div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:10,marginBottom:14}}>
+                {[
+                  ['Quantity',  c.quantity],
+                  ['Unit Price', fmt(c.unit_price)],
+                  ['Purchase',  hasCost ? fmt(c.purchase_price) : '—'],
+                  ['Total Mkt', fmt(total)],
+                  ['Total Cost',hasCost ? fmt(cost) : '—'],
+                  ['P/L',       hasCost ? (gain>=0?'+':'-')+fmt(Math.abs(gain)) : '—'],
+                ].map(([l,v],i)=>(
+                  <div key={i} className="stat-card">
+                    <div className="stat-label">{l}</div>
+                    <div style={{fontSize:14,color: l==='P/L' && hasCost ? (gain>=0?'#4ade80':'#f87171') : '#e8e4d9'}}>{v}</div>
+                  </div>
+                ))}
+              </div>
+              {c.source_url && <div style={{marginBottom:10}}><a href={c.source_url} target="_blank" rel="noreferrer" style={{color:'#f5a623',fontSize:11}}>Source ↗</a></div>}
+              <div style={{display:'flex',justifyContent:'flex-end'}}>
+                <button className="btn btn-primary" onClick={()=>setBinderDetail(null)}>Close</button>
+              </div>
+            </div>
+          </ModalShell>
+        );
+      })()}
+
+      {/* Floating shortcuts cog */}
+      <button
+        onClick={() => setShowShortcuts(true)}
+        title="Keyboard shortcuts"
+        style={{position:'fixed',bottom:16,right:16,width:38,height:38,borderRadius:'50%',
+          background:'#141420',border:'1px solid #252535',color:'#f5a623',cursor:'pointer',
+          fontSize:18,zIndex:90,boxShadow:'0 2px 10px rgba(0,0,0,0.5)'}}
+      >⚙</button>
+
+      {showShortcuts && (
+        <ModalShell title="KEYBOARD SHORTCUTS" onClose={() => { setShowShortcuts(false); setCapturingId(null); }}>
+          <div style={{padding:20}}>
+            <div style={{fontSize:10,color:'#666',marginBottom:14,letterSpacing:1.5}}>
+              Click a key to rebind. Toggles disable individual shortcuts. Saved to this browser.
+            </div>
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+              <tbody>
+                {SHORTCUT_DEFS.map(d => {
+                  const cur = shortcuts[d.id] || { key: d.defaultKey, enabled: true };
+                  const capturing = capturingId === d.id;
+                  return (
+                    <tr key={d.id} style={{borderBottom:'1px solid #1e1e28'}}>
+                      <td style={{padding:'10px 8px',color:'#e8e4d9'}}>{d.label}</td>
+                      <td style={{padding:'10px 8px',textAlign:'center'}}>
+                        <button
+                          onClick={() => setCapturingId(d.id)}
+                          onKeyDown={e => {
+                            if (capturingId !== d.id) return;
+                            e.preventDefault(); e.stopPropagation();
+                            if (e.key === 'Tab') return;
+                            setShortcuts(s => ({ ...s, [d.id]: { ...cur, key: e.key } }));
+                            setCapturingId(null);
+                          }}
+                          style={{background:capturing?'#3d2a0a':'#0a0a0f',border:'1px solid '+(capturing?'#f5a623':'#252535'),
+                            color:'#f5a623',padding:'4px 12px',borderRadius:3,minWidth:80,fontFamily:"'Space Mono',monospace",
+                            fontSize:11,cursor:'pointer'}}
+                        >{capturing ? 'press a key…' : (cur.key === ' ' ? 'Space' : cur.key)}</button>
+                      </td>
+                      <td style={{padding:'10px 8px',textAlign:'right',width:80}}>
+                        <label style={{display:'inline-flex',alignItems:'center',gap:6,cursor:'pointer',margin:0}}>
+                          <input
+                            type="checkbox"
+                            checked={cur.enabled}
+                            onChange={e => setShortcuts(s => ({ ...s, [d.id]: { ...cur, enabled: e.target.checked } }))}
+                          />
+                          <span style={{fontSize:10,color:cur.enabled?'#4ade80':'#666'}}>{cur.enabled?'ON':'OFF'}</span>
+                        </label>
+                      </td>
+                      <td style={{padding:'10px 8px',textAlign:'right',width:60}}>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setShortcuts(s => ({ ...s, [d.id]: { key: d.defaultKey, enabled: true } }))}
+                        >reset</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div style={{display:'flex',justifyContent:'space-between',marginTop:18}}>
+              <button className="btn btn-ghost" onClick={() => {
+                const cleared = Object.fromEntries(SHORTCUT_DEFS.map(d => [d.id, { key: d.defaultKey, enabled: true }]));
+                setShortcuts(cleared);
+              }}>Reset All</button>
+              <button className="btn btn-primary" onClick={() => { setShowShortcuts(false); setCapturingId(null); }}>Done</button>
             </div>
           </div>
         </ModalShell>

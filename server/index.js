@@ -356,6 +356,84 @@ try { db.exec(`ALTER TABLE cards ADD COLUMN image_url TEXT`); } catch(e) {}
 try { db.exec(`ALTER TABLE transactions ADD COLUMN binder_amount REAL`); } catch(e) {}
 try { db.exec(`ALTER TABLE transactions ADD COLUMN binder_credit_used INTEGER DEFAULT 0`); } catch(e) {}
 try { db.exec(`ALTER TABLE binder_inventory ADD COLUMN purchase_price REAL`); } catch(e) {}
+// Set identity on individual stock cards — enables stricter matching during Sync Prices
+try { db.exec(`ALTER TABLE cards ADD COLUMN set_name TEXT`);   } catch(e) {}
+try { db.exec(`ALTER TABLE cards ADD COLUMN set_number TEXT`); } catch(e) {}
+
+// Helper: build a detailed display name like "Bulbasaur — 151 #001 Common"
+// Falls back gracefully when set/number/rarity are missing.
+function buildRichCardName(name, setName, setNumber, rarity) {
+  if (!name) return name;
+  const bits = [];
+  if (setName)   bits.push(setName);
+  if (setNumber) bits.push(`#${setNumber}`);
+  if (rarity)    bits.push(rarity);
+  return bits.length ? `${name} — ${bits.join(' ')}` : name;
+}
+
+// One-time migration: rebuild names + backfill set identity for existing
+// in_stock cards that came from binder imports. Gated by PRAGMA user_version
+// so it only runs once per DB.
+{
+  const currentVersion = db.pragma('user_version', { simple: true });
+  if (currentVersion < 1) {
+    console.log('[migration v1] backfilling rich names + set identity for in-stock cards from binder…');
+    const tx = db.transaction(() => {
+      // Pull every binder row, group by lowercased base name. We'll fan rows
+      // out into individual "slots" so a binder row with quantity=3 yields
+      // three slots that can absorb three matching in_stock cards.
+      const binderRows = db.prepare(
+        `SELECT id, card_name, set_name, set_number, rarity, unit_price, quantity FROM binder_inventory`
+      ).all();
+
+      const slotsByName = new Map(); // lowercased base name -> array of slot objects
+      for (const b of binderRows) {
+        const key = (b.card_name || '').toLowerCase().trim();
+        if (!key) continue;
+        const arr = slotsByName.get(key) || [];
+        const qty = Math.max(1, b.quantity || 1);
+        for (let i = 0; i < qty; i++) {
+          arr.push({ set_name: b.set_name, set_number: b.set_number, rarity: b.rarity, unit_price: b.unit_price || 0 });
+        }
+        slotsByName.set(key, arr);
+      }
+      // Sort slots within each name by unit_price desc — most expensive first.
+      for (const arr of slotsByName.values()) {
+        arr.sort((a, b) => (b.unit_price || 0) - (a.unit_price || 0));
+      }
+
+      // Pick in-stock cards that don't yet have a set_number (i.e. weren't
+      // backfilled by an earlier import). Sort by buy_price desc so the
+      // most-expensive card is paired with the most-expensive binder slot —
+      // that's our best signal for which printing it actually was.
+      const cards = db.prepare(
+        `SELECT id, name, buy_price FROM cards
+         WHERE status='in_stock' AND (set_number IS NULL OR set_number='')
+         ORDER BY buy_price DESC, id ASC`
+      ).all();
+
+      const update = db.prepare(
+        `UPDATE cards SET name=?, set_name=?, set_number=? WHERE id=?`
+      );
+
+      let updated = 0, skipped = 0;
+      for (const c of cards) {
+        // Strip any trailing " — ..." from already-rich names so we re-derive cleanly.
+        const baseName = (c.name || '').split(' — ')[0].trim();
+        const key = baseName.toLowerCase();
+        const arr = slotsByName.get(key);
+        if (!arr || arr.length === 0) { skipped++; continue; }
+        const slot = arr.shift();
+        const rich = buildRichCardName(baseName, slot.set_name, slot.set_number, slot.rarity);
+        update.run(rich, slot.set_name || null, slot.set_number || null, c.id);
+        updated++;
+      }
+      console.log(`[migration v1] updated ${updated} card(s), skipped ${skipped} (no binder match)`);
+      db.pragma('user_version = 1');
+    });
+    tx();
+  }
+}
 
 // Profiles / equity support
 db.exec(`
@@ -425,6 +503,22 @@ db.exec(`
     sale_proceeds   REAL,
     notes           TEXT
   );
+  -- Full per-import snapshot of binder_inventory. One row per (import, card).
+  -- Lets you diff the binder between any two points in time.
+  CREATE TABLE IF NOT EXISTS binder_inventory_snapshots (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    import_id      INTEGER NOT NULL,
+    card_name      TEXT NOT NULL,
+    set_name       TEXT,
+    set_number     TEXT,
+    rarity         TEXT,
+    unit_price     REAL    DEFAULT 0,
+    quantity       INTEGER DEFAULT 0,
+    purchase_price REAL,
+    FOREIGN KEY (import_id) REFERENCES binder_imports(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_bis_import  ON binder_inventory_snapshots(import_id);
+  CREATE INDEX IF NOT EXISTS idx_bis_name    ON binder_inventory_snapshots(card_name);
 `);
 
 app.use(cors());
@@ -620,6 +714,124 @@ app.patch('/api/cards/:id/market', (req, res) => {
   res.json({ ok: true });
 });
 
+// Update set identity (used to enable stricter Sync Prices matching)
+app.patch('/api/cards/:id/set-identity', express.json(), (req, res) => {
+  const { setName, setNumber } = req.body || {};
+  db.prepare('UPDATE cards SET set_name = ?, set_number = ? WHERE id = ?')
+    .run(setName || null, setNumber || null, req.params.id);
+  res.json({ ok: true });
+});
+
+// ── Bulk Sync Prices (stricter, server-side) ──────────────────────────────────
+// Matches in-stock RAW cards against binder_inventory using a tiered key:
+//   1) name + set_name + set_number   (exact printing)
+//   2) name + set_name                (same set, number missing on one side)
+//   3) name alone                     (ONLY if the binder has a single card with that name)
+// Slabs (is_graded=1) are skipped — binder prices reflect raw market and would
+// misprice graded cards. When a match is found we update current_market AND
+// opportunistically backfill set_name/set_number on the card if they were empty —
+// so subsequent syncs can land in the stricter tiers automatically.
+app.post('/api/cards/bulk-sync-prices', (req, res) => {
+  try {
+    const norm = s => (s || '').toString().toLowerCase().trim().replace(/\s+/g, ' ');
+    const binder = db.prepare('SELECT card_name, set_name, set_number, unit_price FROM binder_inventory').all();
+
+    // Build the three lookup maps.
+    const byNameSetNum = new Map();  // "name|set|num"   -> unit_price
+    const byNameSet    = new Map();  // "name|set"       -> unit_price | null (null = ambiguous)
+    const byName       = new Map();  // "name"           -> { price, setName, setNumber } | null (null = ambiguous)
+    for (const b of binder) {
+      if (!b.unit_price || b.unit_price <= 0) continue;
+      const n = norm(b.card_name);
+      const s = norm(b.set_name);
+      const num = norm(b.set_number);
+      if (!n) continue;
+
+      if (s && num) {
+        byNameSetNum.set(`${n}|${s}|${num}`, b.unit_price);
+      }
+      if (s) {
+        const k = `${n}|${s}`;
+        byNameSet.set(k, byNameSet.has(k) ? null : b.unit_price);
+      }
+      if (byName.has(n)) {
+        byName.set(n, null); // mark ambiguous on any second hit
+      } else {
+        byName.set(n, { price: b.unit_price, setName: b.set_name || null, setNumber: b.set_number || null });
+      }
+    }
+
+    const stock = db.prepare(`SELECT id, name, set_name, set_number, current_market FROM cards WHERE status='in_stock' AND is_graded=0`).all();
+    const slabsSkipped = db.prepare(`SELECT COUNT(*) AS n FROM cards WHERE status='in_stock' AND is_graded=1`).get().n;
+    // Strip the " — SetName #Num Rarity" suffix added by buildRichCardName so
+    // we match against binder_inventory.card_name (which stores the bare name).
+    const baseName = (s) => (s || '').split(' — ')[0];
+    const updateMarket   = db.prepare('UPDATE cards SET current_market = ? WHERE id = ?');
+    const updateMktIdent = db.prepare("UPDATE cards SET current_market = ?, set_name = COALESCE(NULLIF(set_name,''), ?), set_number = COALESCE(NULLIF(set_number,''), ?) WHERE id = ?");
+
+    let exact = 0, bySet = 0, byNameOnly = 0, ambiguousSkipped = 0, noMatch = 0, unchanged = 0;
+
+    const applyAll = db.transaction(() => {
+      for (const c of stock) {
+        const n = norm(baseName(c.name));
+        const s = norm(c.set_name);
+        const num = norm(c.set_number);
+        let price = null;
+        let tier = null;
+        let backfillSet = null, backfillNum = null;
+
+        // Tier 1: exact printing
+        if (n && s && num) {
+          const p = byNameSetNum.get(`${n}|${s}|${num}`);
+          if (p != null) { price = p; tier = 'exact'; }
+        }
+        // Tier 2: name + set
+        if (price == null && n && s) {
+          const p = byNameSet.get(`${n}|${s}`);
+          if (p === null)      { ambiguousSkipped++; continue; } // multiple binder rows for this name+set
+          if (p != null)       { price = p; tier = 'bySet'; }
+        }
+        // Tier 3: name alone (only if unique in binder)
+        if (price == null && n) {
+          const hit = byName.get(n);
+          if (hit === null)    { ambiguousSkipped++; continue; } // multiple printings with this name
+          if (hit)             {
+            price = hit.price;
+            tier = 'byName';
+            backfillSet = hit.setName;
+            backfillNum = hit.setNumber;
+          }
+        }
+
+        if (price == null) { noMatch++; continue; }
+
+        if (Math.abs((c.current_market || 0) - price) < 0.001) { unchanged++; continue; }
+
+        // Backfill set identity only when the card didn't already have it.
+        if (tier === 'byName' && (backfillSet || backfillNum) && (!c.set_name || !c.set_number)) {
+          updateMktIdent.run(price, backfillSet, backfillNum, c.id);
+        } else {
+          updateMarket.run(price, c.id);
+        }
+
+        if (tier === 'exact')  exact++;
+        if (tier === 'bySet')  bySet++;
+        if (tier === 'byName') byNameOnly++;
+      }
+    });
+    applyAll();
+
+    res.json({
+      ok: true,
+      updated: exact + bySet + byNameOnly,
+      breakdown: { exact, bySet, byNameOnly, unchanged, ambiguousSkipped, noMatch, slabsSkipped },
+    });
+  } catch (e) {
+    console.error('[bulk-sync-prices]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Update card image only
 app.patch('/api/cards/:id/image', (req, res) => {
   db.prepare('UPDATE cards SET image_url = ? WHERE id = ?')
@@ -711,15 +923,88 @@ app.post('/api/transactions', (req, res) => {
         .run(txId, t.imageUrl);
     }
 
+    // Track binder_inventory adjustments so we can append a paper trail to
+    // the transaction notes. Prevents the "double-sale" trap on the next
+    // scraper import: if a card sold manually stays in binder_inventory,
+    // the next binder import diff will see it as "removed" and can prompt
+    // the user to enter sale proceeds a second time.
+    const binderAdjustments = [];
+
     for (const co of t.cardsOut) {
       db.prepare(`
         INSERT INTO tx_cards_out (transaction_id, card_id, name, grade, is_graded, current_market, sale_price)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(txId, co.id, co.name, co.grade || null, co.isGraded ? 1 : 0, co.currentMarket, co.salePrice);
 
+      // Pull the card's set identity before we mark it sold so we can do a
+      // set-aware match against binder_inventory.
+      const cardRow = db.prepare('SELECT name, set_name, set_number FROM cards WHERE id=?').get(co.id);
+
       db.prepare('UPDATE cards SET status=?, transaction_id=?, sale_price=? WHERE id=?')
         .run(t.type === 'sale' ? 'sold' : 'traded', txId, co.salePrice, co.id);
       // ownership stays in card_profiles — intentionally NOT deleted on sale
+
+      // Decrement (or delete) the matching binder_inventory row. Only runs
+      // for sales/trades — buys don't remove anything.
+      if ((t.type === 'sale' || t.type === 'trade') && cardRow) {
+        // Strip the rich-name suffix added by buildRichCardName so we match
+        // against binder_inventory.card_name (which stores the bare name).
+        const name = (cardRow.name || '').split(' — ')[0];
+        const sName = cardRow.set_name || null;
+        const sNum  = cardRow.set_number || null;
+
+        // Tier 1: name + set_name + set_number
+        let binderMatch = null;
+        if (sName && sNum) {
+          binderMatch = db.prepare(
+            `SELECT id, card_name, set_name, set_number, quantity FROM binder_inventory
+             WHERE lower(card_name)=lower(?) AND lower(set_name)=lower(?) AND lower(set_number)=lower(?)
+             LIMIT 1`
+          ).get(name, sName, sNum);
+        }
+        // Tier 2: name + set_name
+        if (!binderMatch && sName) {
+          const candidates = db.prepare(
+            `SELECT id, card_name, set_name, set_number, quantity FROM binder_inventory
+             WHERE lower(card_name)=lower(?) AND lower(set_name)=lower(?)`
+          ).all(name, sName);
+          if (candidates.length === 1) binderMatch = candidates[0];
+        }
+        // Tier 3: name alone — ONLY if unique (otherwise ambiguous, skip).
+        if (!binderMatch) {
+          const candidates = db.prepare(
+            `SELECT id, card_name, set_name, set_number, quantity FROM binder_inventory
+             WHERE lower(card_name)=lower(?)`
+          ).all(name);
+          if (candidates.length === 1) binderMatch = candidates[0];
+          else if (candidates.length > 1) {
+            binderAdjustments.push(`${name} (ambiguous — ${candidates.length} binder rows with this name; not decremented)`);
+          }
+        }
+
+        if (binderMatch) {
+          const newQty = (binderMatch.quantity || 0) - 1;
+          if (newQty > 0) {
+            db.prepare('UPDATE binder_inventory SET quantity=?, last_seen_at=? WHERE id=?')
+              .run(newQty, new Date().toISOString(), binderMatch.id);
+            binderAdjustments.push(
+              `${name}${binderMatch.set_name ? ` — ${binderMatch.set_name}` : ''}${binderMatch.set_number ? ` #${binderMatch.set_number}` : ''}: binder qty ${binderMatch.quantity}→${newQty}`
+            );
+          } else {
+            db.prepare('DELETE FROM binder_inventory WHERE id=?').run(binderMatch.id);
+            binderAdjustments.push(
+              `${name}${binderMatch.set_name ? ` — ${binderMatch.set_name}` : ''}${binderMatch.set_number ? ` #${binderMatch.set_number}` : ''}: binder row removed (qty was ${binderMatch.quantity})`
+            );
+          }
+        }
+      }
+    }
+
+    // Append the binder adjustment paper trail to the transaction's notes.
+    if (binderAdjustments.length) {
+      const trail = `[binder sync] ${binderAdjustments.join('; ')}`;
+      const existingNotes = t.notes ? `${t.notes}\n${trail}` : trail;
+      db.prepare('UPDATE transactions SET notes=? WHERE id=?').run(existingNotes, txId);
     }
 
     for (const ci of t.cardsIn) {
@@ -790,14 +1075,72 @@ app.post('/api/transactions/:id/undo', (req, res) => {
   if (!tx) return res.status(404).json({ error: 'Transaction not found' });
 
   db.transaction(() => {
-    // 1) Revert cards that went out back to in_stock
+    // 1) Revert cards that went out back to in_stock, and re-credit any
+    //    binder_inventory decrement that the original sale/trade applied.
+    const isSaleOrTrade = (tx.type === 'sale' || tx.type === 'trade');
+    const binderRestores = [];
     const outs = db.prepare('SELECT * FROM tx_cards_out WHERE transaction_id = ?').all(id);
     for (const o of outs) {
       if (o.card_id != null) {
+        // Pull set identity BEFORE flipping status (status flip doesn't touch
+        // these columns, but read it here for symmetry with the sale path).
+        const cardRow = db.prepare(
+          'SELECT name, set_name, set_number, purchase_price FROM cards WHERE id=?'
+        ).get(o.card_id);
+
         db.prepare(`
           UPDATE cards SET status='in_stock', transaction_id=NULL, sale_price=NULL WHERE id=?
         `).run(o.card_id);
+
+        if (isSaleOrTrade && cardRow) {
+          const name  = (cardRow.name || '').split(' — ')[0];
+          const sName = cardRow.set_name || null;
+          const sNum  = cardRow.set_number || null;
+
+          // Mirror the sale handler's tiered match. If a binder row still
+          // exists, bump qty by 1; otherwise re-insert a fresh row with the
+          // info we have (qty=1, unit_price from purchase_price or 0).
+          let binderMatch = null;
+          if (sName && sNum) {
+            binderMatch = db.prepare(
+              `SELECT id, quantity FROM binder_inventory
+               WHERE lower(card_name)=lower(?) AND lower(set_name)=lower(?) AND lower(set_number)=lower(?)
+               LIMIT 1`
+            ).get(name, sName, sNum);
+          }
+          if (!binderMatch && sName) {
+            const candidates = db.prepare(
+              `SELECT id, quantity FROM binder_inventory
+               WHERE lower(card_name)=lower(?) AND lower(set_name)=lower(?)`
+            ).all(name, sName);
+            if (candidates.length === 1) binderMatch = candidates[0];
+          }
+          if (!binderMatch) {
+            const candidates = db.prepare(
+              `SELECT id, quantity FROM binder_inventory WHERE lower(card_name)=lower(?)`
+            ).all(name);
+            if (candidates.length === 1) binderMatch = candidates[0];
+          }
+
+          const now = new Date().toISOString();
+          if (binderMatch) {
+            const newQty = (binderMatch.quantity || 0) + 1;
+            db.prepare('UPDATE binder_inventory SET quantity=?, last_seen_at=? WHERE id=?')
+              .run(newQty, now, binderMatch.id);
+            binderRestores.push(`${name}: binder qty ${binderMatch.quantity}→${newQty}`);
+          } else {
+            db.prepare(
+              `INSERT INTO binder_inventory
+                 (card_name, set_name, set_number, rarity, unit_price, quantity, first_seen_at, last_seen_at)
+               VALUES (?, ?, ?, NULL, ?, 1, ?, ?)`
+            ).run(name, sName, sNum, cardRow.purchase_price || 0, now, now);
+            binderRestores.push(`${name}: binder row re-inserted (qty=1)`);
+          }
+        }
       }
+    }
+    if (binderRestores.length) {
+      console.log(`[undo tx ${id}] binder restores: ${binderRestores.join('; ')}`);
     }
 
     // 2) Remove cards that came in via this transaction (and their ownership)
@@ -892,6 +1235,8 @@ app.get('/api/export/transactions.csv', (req, res) => {
 function dbToCard(c) {
   return {
     id: c.id, name: c.name,
+    setName: c.set_name || null,
+    setNumber: c.set_number || null,
     isGraded: c.is_graded === 1,
     gradingCompany: c.grading_company, grade: c.grade,
     condition: c.condition_val,
@@ -964,6 +1309,92 @@ app.get('/api/backup/download/uploads', (req, res) => {
   if (!fs.existsSync(uploadsZipPath)) return res.status(404).json({ error: 'No uploads backup found — trigger a backup first' });
   res.download(uploadsZipPath, 'uploads-backup.zip');
 });
+
+// ── Restore from backup ───────────────────────────────────────────────────────
+// Accepts either an uploaded .db file (field name "db") or { filename } in the
+// body referencing a file already in the backups/ directory. Safely swaps files
+// (including -wal and -shm) and exits the process so start-server.bat relaunches
+// with a fresh handle on the restored database.
+const dbUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024 }, // 200MB ceiling for db uploads
+});
+
+function performRestore(sourceBuffer, label) {
+  // 1. Flush WAL into main db then release the handle.
+  try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
+  try { db.close(); } catch {}
+
+  // 2. Remove all three sqlite files so no stale WAL frames get replayed.
+  for (const suffix of ['', '-wal', '-shm']) {
+    const p = dbPath + suffix;
+    if (fs.existsSync(p)) {
+      try { fs.unlinkSync(p); }
+      catch (e) { throw new Error(`Failed to remove ${path.basename(p)}: ${e.message}`); }
+    }
+  }
+
+  // 3. Write the restored db bytes into place as the new cardledger.db.
+  fs.writeFileSync(dbPath, sourceBuffer);
+  console.log(`[restore] ${label} → wrote ${sourceBuffer.length} bytes to cardledger.db`);
+}
+
+app.post('/api/backup/restore/upload', dbUpload.single('db'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded (expected field "db")' });
+    // Sanity-check the magic header: SQLite files begin with "SQLite format 3\0".
+    const magic = req.file.buffer.slice(0, 16).toString('utf8');
+    if (!magic.startsWith('SQLite format 3')) {
+      return res.status(400).json({ error: 'Uploaded file is not a valid SQLite database' });
+    }
+    performRestore(req.file.buffer, `upload (${req.file.originalname})`);
+    res.json({ ok: true, message: 'Database restored. Server is restarting — reload in a few seconds.' });
+    // Give the response a beat to flush, then exit so the bat file's restart loop relaunches.
+    setTimeout(() => process.exit(0), 250);
+  } catch (e) {
+    console.error('[restore]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/backup/restore/from-backup', express.json(), (req, res) => {
+  try {
+    const { filename } = req.body || {};
+    if (!filename || typeof filename !== 'string') {
+      return res.status(400).json({ error: 'Missing { filename } in body' });
+    }
+    // Guard against path traversal: reject anything with a separator.
+    if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+      return res.status(400).json({ error: 'Invalid filename' });
+    }
+    const src = path.join(backupDir, filename);
+    if (!fs.existsSync(src)) return res.status(404).json({ error: 'Backup file not found' });
+    const buf = fs.readFileSync(src);
+    performRestore(buf, `from-backup (${filename})`);
+    res.json({ ok: true, message: 'Database restored. Server is restarting — reload in a few seconds.' });
+    setTimeout(() => process.exit(0), 250);
+  } catch (e) {
+    console.error('[restore]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Graceful shutdown: checkpoint + truncate WAL so the main .db is always
+// self-contained when the process exits. Defense in depth against the
+// "swap .db but leave stale WAL" failure mode.
+function gracefulShutdown(signal) {
+  try {
+    console.log(`\n[shutdown] ${signal} received — checkpointing WAL...`);
+    db.pragma('wal_checkpoint(TRUNCATE)');
+    db.close();
+    console.log('[shutdown] WAL checkpointed and db closed cleanly.');
+  } catch (e) {
+    console.warn('[shutdown] checkpoint failed:', e.message);
+  }
+  process.exit(0);
+}
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 // ── Costs endpoints ────────────────────────────────────────────────────────────
 app.get('/api/costs', (req, res) => {
@@ -1193,6 +1624,70 @@ app.get('/api/binder/inventory', (req, res) => {
   res.json({ cards, imports });
 });
 
+// ── Binder inventory snapshots ────────────────────────────────────────────────
+// List every import with its snapshot row count. The client uses this to
+// populate a dropdown for diffing.
+app.get('/api/binder/snapshots', (req, res) => {
+  const rows = db.prepare(`
+    SELECT bi.id, bi.imported_at, bi.cards_added, bi.cards_removed,
+           bi.qty_increased, bi.qty_decreased, bi.cards_unchanged,
+           bi.cost_basis, bi.sale_proceeds, bi.notes,
+           (SELECT COUNT(*) FROM binder_inventory_snapshots s WHERE s.import_id = bi.id) AS snapshot_rows
+    FROM binder_imports bi
+    ORDER BY bi.imported_at DESC
+  `).all();
+  res.json(rows);
+});
+
+// Diff two snapshots: added / removed / qty changed / price changed.
+// Key cards on name+set+number (falls back to name alone if set/num missing).
+// IMPORTANT: must be registered BEFORE /api/binder/snapshots/:importId so
+// Express doesn't match "diff" as an :importId param.
+app.get('/api/binder/snapshots/diff', (req, res) => {
+  try {
+    const from = Number(req.query.from);
+    const to   = Number(req.query.to);
+    if (!from || !to) return res.status(400).json({ error: 'Need ?from=<importId>&to=<importId>' });
+
+    const keyOf = r => `${(r.card_name || '').toLowerCase().trim()}|${(r.set_name || '').toLowerCase().trim()}|${(r.set_number || '').toLowerCase().trim()}`;
+    const fromRows = db.prepare('SELECT * FROM binder_inventory_snapshots WHERE import_id = ?').all(from);
+    const toRows   = db.prepare('SELECT * FROM binder_inventory_snapshots WHERE import_id = ?').all(to);
+    if (!fromRows.length && !toRows.length) return res.status(404).json({ error: 'Both snapshots empty or not found' });
+
+    const fromMap = new Map(fromRows.map(r => [keyOf(r), r]));
+    const toMap   = new Map(toRows.map(r   => [keyOf(r), r]));
+
+    const added = [], removed = [], qtyChanged = [], priceChanged = [];
+    for (const [k, t] of toMap) {
+      const f = fromMap.get(k);
+      if (!f) { added.push(t); continue; }
+      if (f.quantity !== t.quantity) {
+        qtyChanged.push({ ...t, prev_quantity: f.quantity, delta: t.quantity - f.quantity });
+      }
+      if (Math.abs((f.unit_price || 0) - (t.unit_price || 0)) > 0.001) {
+        priceChanged.push({ ...t, prev_unit_price: f.unit_price, delta_price: (t.unit_price || 0) - (f.unit_price || 0) });
+      }
+    }
+    for (const [k, f] of fromMap) {
+      if (!toMap.has(k)) removed.push(f);
+    }
+    res.json({ from, to, added, removed, qtyChanged, priceChanged });
+  } catch (e) {
+    console.error('[snapshots/diff]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Full snapshot for a single import.
+app.get('/api/binder/snapshots/:importId', (req, res) => {
+  const id = Number(req.params.importId);
+  if (!id) return res.status(400).json({ error: 'Invalid import id' });
+  const meta = db.prepare('SELECT * FROM binder_imports WHERE id = ?').get(id);
+  if (!meta) return res.status(404).json({ error: 'Import not found' });
+  const rows = db.prepare('SELECT * FROM binder_inventory_snapshots WHERE import_id = ? ORDER BY card_name').all(id);
+  res.json({ import: meta, cards: rows });
+});
+
 // POST /api/binder/preview  — parse CSV, return diff (no DB writes)
 app.post('/api/binder/preview', (req, res) => {
   try {
@@ -1204,9 +1699,16 @@ app.post('/api/binder/preview', (req, res) => {
       + diff.qtyUp.reduce((s, c) => s + c.unit_price * c.delta, 0);
     const totalRemovedValue = diff.removed.reduce((s, c) => s + (c.storedUnitPrice || c.unit_price) * c.quantity, 0)
       + diff.qtyDown.reduce((s, c) => s + (c.storedUnitPrice || c.unit_price) * c.delta, 0);
-    // Unsettled binder credit — separate in (received) and out (paid) totals
-    const binderIn  = db.prepare(`SELECT COALESCE(SUM(binder_amount), 0) as total FROM transactions WHERE binder_credit_used=0 AND binder_amount > 0`).get().total || 0;
-    const binderOut = db.prepare(`SELECT COALESCE(SUM(binder_amount), 0) as total FROM transactions WHERE binder_credit_used=0 AND binder_amount < 0`).get().total || 0;
+    // Unsettled binder credit — separate in (received) and out (paid) totals.
+    // Self-heal: if outstanding rows already net to zero (in + out balance),
+    // mark them settled now so the preview doesn't surface a phantom debt.
+    let binderIn  = db.prepare(`SELECT COALESCE(SUM(binder_amount), 0) as total FROM transactions WHERE binder_credit_used=0 AND binder_amount > 0`).get().total || 0;
+    let binderOut = db.prepare(`SELECT COALESCE(SUM(binder_amount), 0) as total FROM transactions WHERE binder_credit_used=0 AND binder_amount < 0`).get().total || 0;
+    if (binderIn + binderOut === 0 && (binderIn !== 0 || binderOut !== 0)) {
+      db.prepare(`UPDATE transactions SET binder_credit_used=1 WHERE binder_credit_used=0 AND binder_amount IS NOT NULL AND binder_amount != 0`).run();
+      binderIn = 0;
+      binderOut = 0;
+    }
     const binderCredit = binderIn + binderOut; // net (out is negative)
     res.json({ ...diff, totalNewValue, totalRemovedValue, totalParsed: newCards.length, binderCredit, binderIn, binderOut: Math.abs(binderOut) });
   } catch (e) {
@@ -1217,11 +1719,42 @@ app.post('/api/binder/preview', (req, res) => {
 // POST /api/binder/import  — apply diff, optionally create ledger transactions
 app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
   try {
-    const { csvText, costBasis, binderCredit, saleProceeds, saleBinder, notes, date, owners } = req.body;
+    const { csvText, costBasis, binderCredit, saleProceeds, saleBinder, notes, date, owners, confirmRemovedNoSale, removedDisposition } = req.body;
+    // Auto-backup before destructive import
+    Promise.resolve().then(() => writeBackup('pre-binder-import')).catch(e => console.warn('Pre-import backup failed:', e.message));
     const newCards = parseBinderCSV(csvText);
     const { added, removed, qtyUp, qtyDown, unchanged } = computeBinderDiff(newCards);
     const txDate = date || new Date().toISOString().split('T')[0];
     const now = new Date().toISOString();
+
+    // ── Warning gate: removals present but no sale proceeds entered ──────────
+    // Without this check, the old code would silently delete binder rows and
+    // leave matching in_stock card rows orphaned forever. Require the client
+    // to acknowledge the removals and choose a disposition ('removed' = lost/
+    // destroyed/gifted, or 'sold' = treat as sold at current_market).
+    const totalProceedsPreview = (parseFloat(saleProceeds) || 0) + (parseFloat(saleBinder) || 0);
+    const hasRemovals = removed.length > 0 || qtyDown.length > 0;
+    if (hasRemovals && totalProceedsPreview === 0 && !confirmRemovedNoSale) {
+      // Collect affected in-stock cards so the client can show them in a confirm dialog.
+      const affected = [];
+      const inspect = (c, qty) => {
+        const rows = db.prepare(
+          `SELECT id, name, set_name, set_number, current_market FROM cards
+           WHERE lower(name)=lower(?) AND status='in_stock' LIMIT ?`
+        ).all(c.card_name, qty);
+        for (const r of rows) affected.push(r);
+      };
+      for (const c of removed)  inspect(c, c.quantity);
+      for (const c of qtyDown)  inspect(c, c.delta);
+
+      return res.status(409).json({
+        warning: 'removed_no_sale',
+        message: 'The import has removed cards but no sale proceeds were entered. Confirm the disposition.',
+        affectedInStockCards: affected,
+        removedBinderCount: removed.length + qtyDown.length,
+        hint: "Resubmit with { confirmRemovedNoSale: true, removedDisposition: 'removed' | 'sold' }",
+      });
+    }
 
     // All "effective new" cards (new type + qty increase delta)
     const effectiveAdded = [
@@ -1233,6 +1766,10 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
       ...removed,
       ...qtyDown.map(c => ({ ...c, quantity: c.delta })),
     ];
+
+    // Hoisted so the response can report which cards were marked removed/sold
+    // by the acknowledged-removal path. Populated inside the transaction below.
+    const markRemovedAffectedOuter = [];
 
     db.transaction(() => {
       // ── Settle binder credit balance ─────────────────────────────────────────
@@ -1284,12 +1821,13 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
         // market_profit = market value of cards received minus what we paid (cash + binder)
         const buyMarketProfit = totalNewValue - totalBasis;
         const txId = db.prepare(
-          `INSERT INTO transactions (type, date, cash_in, cash_out, notes, market_profit, payment_method, binder_amount)
-           VALUES (?,?,?,?,?,?,?,?)`
+          `INSERT INTO transactions (type, date, cash_in, cash_out, notes, market_profit, payment_method, binder_amount, binder_credit_used)
+           VALUES (?,?,?,?,?,?,?,?,?)`
         ).run('buy', txDate, 0, cashPortion,
           notes || `Binder import: ${effectiveAdded.length} new card type(s)` + (binderPortion ? ` (+${binderPortion.toFixed(2)} binder credit)` : ''),
           buyMarketProfit, pmParts,
-          binderPortion > 0 ? -binderPortion : null
+          binderPortion > 0 ? -binderPortion : null,
+          binderPortion > 0 ? 1 : 0   // born settled — the credit is consumed at creation time
         ).lastInsertRowid;
 
         for (const card of effectiveAdded) {
@@ -1297,11 +1835,17 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
           const lotCost      = basis * proportion;
           const unitCost     = card.quantity > 0 ? lotCost / card.quantity : lotCost;
 
+          // Build a detailed display name so two cards with the same base name
+          // (e.g. multiple Bulbasaurs from different sets) are visually distinct
+          // AND so the bulk-sync-prices matcher can disambiguate them via the
+          // set_name/set_number columns we now persist.
+          const richName = buildRichCardName(card.card_name, card.set_name, card.set_number, card.rarity);
+
           for (let q = 0; q < card.quantity; q++) {
             const cardId = db.prepare(
-              `INSERT INTO cards (name, condition_val, buy_price, market_at_purchase, current_market, status, transaction_id)
-               VALUES (?,?,?,?,?,?,?)`
-            ).run(card.card_name, 'Near Mint', unitCost, card.unit_price, card.unit_price, 'in_stock', txId).lastInsertRowid;
+              `INSERT INTO cards (name, set_name, set_number, condition_val, buy_price, market_at_purchase, current_market, status, transaction_id)
+               VALUES (?,?,?,?,?,?,?,?,?)`
+            ).run(richName, card.set_name || null, card.set_number || null, 'Near Mint', unitCost, card.unit_price, card.unit_price, 'in_stock', txId).lastInsertRowid;
 
             if (owners && owners.length > 0) {
               for (const o of owners) {
@@ -1314,7 +1858,7 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
           db.prepare(
             `INSERT INTO tx_cards_in (transaction_id, name, condition_val, buy_price, market_at_purchase, current_market)
              VALUES (?,?,?,?,?,?)`
-          ).run(txId, `${card.card_name}${card.quantity > 1 ? ` ×${card.quantity}` : ''}`,
+          ).run(txId, `${richName}${card.quantity > 1 ? ` ×${card.quantity}` : ''}`,
             'Near Mint', unitCost, card.unit_price, card.unit_price);
         }
       }
@@ -1379,15 +1923,65 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
         }
       }
 
+      // ── Handle removals with no sale proceeds (user acknowledged) ────────
+      // When the user confirms removals without entering sale proceeds, we
+      // update the matching in_stock cards so they don't stay orphaned. Two
+      // dispositions:
+      //   - 'sold'   : mark status='sold' with sale_price = current_market
+      //                (treats it as sold at current market — no revenue
+      //                transaction is created, but the cards leave in-stock
+      //                with a fair-value sale price for reporting.)
+      //   - 'removed': mark status='removed' (default) — card is gone from
+      //                inventory but no revenue event is recorded. Use for
+      //                lost / destroyed / gifted cards.
+      if (hasRemovals && totalProceedsPreview === 0 && confirmRemovedNoSale) {
+        const disposition = removedDisposition === 'sold' ? 'sold' : 'removed';
+        const doOne = (cardName, qty) => {
+          const matching = db.prepare(
+            `SELECT id, current_market FROM cards
+             WHERE lower(name)=lower(?) AND status='in_stock' LIMIT ?`
+          ).all(cardName, qty);
+          for (const mc of matching) {
+            if (disposition === 'sold') {
+              db.prepare('UPDATE cards SET status=?, sale_price=? WHERE id=?')
+                .run('sold', mc.current_market || 0, mc.id);
+            } else {
+              db.prepare('UPDATE cards SET status=? WHERE id=?').run('removed', mc.id);
+            }
+            markRemovedAffectedOuter.push({ id: mc.id, name: cardName, disposition });
+          }
+        };
+        for (const c of removed) doOne(c.card_name, c.quantity);
+        for (const c of qtyDown) doOne(c.card_name, c.delta);
+      }
+
       // ── Record import history ───────────────────────────────────────────────
-      db.prepare(
+      const importId = db.prepare(
         `INSERT INTO binder_imports (imported_at, cards_added, cards_removed, qty_increased, qty_decreased, cards_unchanged, cost_basis, sale_proceeds, notes)
          VALUES (?,?,?,?,?,?,?,?,?)`
       ).run(now, added.length, removed.length, qtyUp.length, qtyDown.length, unchanged.length,
-        totalBasis > 0 ? totalBasis : null, saleProceeds || null, notes || null);
+        totalBasis > 0 ? totalBasis : null, saleProceeds || null, notes || null).lastInsertRowid;
+
+      // ── Per-import full snapshot of binder_inventory ────────────────────────
+      // Runs AFTER all mutations above so the snapshot reflects the state the
+      // user would see in-app immediately following this import.
+      const snapRows = db.prepare('SELECT card_name, set_name, set_number, rarity, unit_price, quantity, purchase_price FROM binder_inventory').all();
+      const snapInsert = db.prepare(
+        `INSERT INTO binder_inventory_snapshots
+           (import_id, card_name, set_name, set_number, rarity, unit_price, quantity, purchase_price)
+         VALUES (?,?,?,?,?,?,?,?)`
+      );
+      for (const r of snapRows) {
+        snapInsert.run(importId, r.card_name, r.set_name, r.set_number, r.rarity, r.unit_price, r.quantity, r.purchase_price);
+      }
     })();
 
-    res.json({ ok: true, added: added.length + qtyUp.length, removed: removed.length + qtyDown.length });
+    res.json({
+      ok: true,
+      added: added.length + qtyUp.length,
+      removed: removed.length + qtyDown.length,
+      markedRemoved: markRemovedAffectedOuter,
+    });
   } catch (e) {
     console.error('[binder-import]', e);
     res.status(500).json({ error: e.message });
