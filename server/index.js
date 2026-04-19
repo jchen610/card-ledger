@@ -324,7 +324,7 @@ db.exec(`
     name           TEXT,
     grade          TEXT,
     is_graded      INTEGER DEFAULT 0,
-    current_market REAL,
+    market_at_sale REAL,
     sale_price     REAL
   );
 
@@ -337,8 +337,7 @@ db.exec(`
     grade              TEXT,
     condition_val      TEXT,
     buy_price          REAL DEFAULT 0,
-    market_at_purchase REAL DEFAULT 0,
-    current_market     REAL DEFAULT 0
+    market_at_purchase REAL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS tx_images (
@@ -356,9 +355,13 @@ try { db.exec(`ALTER TABLE cards ADD COLUMN image_url TEXT`); } catch(e) {}
 try { db.exec(`ALTER TABLE transactions ADD COLUMN binder_amount REAL`); } catch(e) {}
 try { db.exec(`ALTER TABLE transactions ADD COLUMN binder_credit_used INTEGER DEFAULT 0`); } catch(e) {}
 try { db.exec(`ALTER TABLE binder_inventory ADD COLUMN purchase_price REAL`); } catch(e) {}
+// v3: tx_cards_out.current_market → market_at_sale (snapshot at sale time)
+try { db.exec(`ALTER TABLE tx_cards_out RENAME COLUMN current_market TO market_at_sale`); } catch(e) {}
 // Set identity on individual stock cards — enables stricter matching during Sync Prices
 try { db.exec(`ALTER TABLE cards ADD COLUMN set_name TEXT`);   } catch(e) {}
 try { db.exec(`ALTER TABLE cards ADD COLUMN set_number TEXT`); } catch(e) {}
+try { db.exec(`ALTER TABLE cards ADD COLUMN buy_transaction_id INTEGER`); } catch(e) {}
+try { db.exec(`ALTER TABLE tx_cards_in ADD COLUMN card_id INTEGER`); } catch(e) {}
 
 // Helper: build a detailed display name like "Bulbasaur — 151 #001 Common"
 // Falls back gracefully when set/number/rarity are missing.
@@ -432,6 +435,59 @@ function buildRichCardName(name, setName, setNumber, rarity) {
       db.pragma('user_version = 1');
     });
     tx();
+  }
+  if (currentVersion < 2) {
+    console.log('[migration v2] backfilling buy_transaction_id + tx_cards_in.card_id …');
+    db.transaction(() => {
+      // For cards that still have transaction_id pointing to a BUY tx, that IS the buy tx.
+      // For cards whose transaction_id points to a SALE tx (overwritten), we find the buy
+      // tx by looking at tx_cards_in rows that match by name.
+      const allCards = db.prepare('SELECT id, name, transaction_id, buy_price, status FROM cards').all();
+      const allTx = db.prepare('SELECT id, type FROM transactions').all();
+      const txTypeMap = new Map(allTx.map(t => [t.id, t.type]));
+
+      // tx_cards_in rows (no card_id yet)
+      const allTci = db.prepare('SELECT id, transaction_id, name, buy_price FROM tx_cards_in').all();
+      // Build lookup: tx_id -> array of tx_cards_in rows
+      const tciByTx = new Map();
+      for (const tci of allTci) {
+        const arr = tciByTx.get(tci.transaction_id) || [];
+        arr.push(tci);
+        tciByTx.set(tci.transaction_id, arr);
+      }
+
+      const updateCard = db.prepare('UPDATE cards SET buy_transaction_id=? WHERE id=?');
+      const updateTci = db.prepare('UPDATE tx_cards_in SET card_id=? WHERE id=?');
+
+      let cardsFilled = 0, tciFilled = 0;
+      for (const c of allCards) {
+        const txType = txTypeMap.get(c.transaction_id);
+        if (txType === 'buy' || txType === 'trade') {
+          // transaction_id still points to the buy/trade — use it directly
+          updateCard.run(c.transaction_id, c.id);
+          cardsFilled++;
+          // Link the matching tx_cards_in row
+          const candidates = tciByTx.get(c.transaction_id) || [];
+          const match = candidates.find(r => r.name === c.name && !r._used);
+          if (match) { updateTci.run(c.id, match.id); match._used = true; tciFilled++; }
+        } else {
+          // transaction_id points to a sale — find the buy tx via tx_cards_in name match
+          for (const [txId, rows] of tciByTx) {
+            if (txTypeMap.get(txId) !== 'buy' && txTypeMap.get(txId) !== 'trade') continue;
+            const match = rows.find(r => r.name === c.name && !r._used);
+            if (match) {
+              updateCard.run(txId, c.id);
+              updateTci.run(c.id, match.id);
+              match._used = true;
+              cardsFilled++; tciFilled++;
+              break;
+            }
+          }
+        }
+      }
+      console.log(`[migration v2] cards.buy_transaction_id filled: ${cardsFilled}, tx_cards_in.card_id filled: ${tciFilled}`);
+      db.pragma('user_version = 2');
+    })();
   }
 }
 
@@ -840,18 +896,67 @@ app.patch('/api/cards/:id/image', (req, res) => {
 });
 
 // Full card update (edit modals)
+// Recalculate and store market_profit for a transaction
+function recalcMarketProfit(txId) {
+  const tx = db.prepare('SELECT * FROM transactions WHERE id = ?').get(txId);
+  if (!tx) return;
+  const ins  = db.prepare('SELECT tci.*, c.current_market as card_cm FROM tx_cards_in tci LEFT JOIN cards c ON tci.card_id = c.id WHERE tci.transaction_id = ?').all(txId);
+  const outs = db.prepare('SELECT tco.*, c.buy_price as card_bp, c.market_at_purchase as card_map FROM tx_cards_out tco LEFT JOIN cards c ON tco.card_id = c.id WHERE tco.transaction_id = ?').all(txId);
+  const v = tx.venmo_amount || 0, z = tx.zelle_amount || 0, b = tx.binder_amount || 0;
+  const flowIn  = tx.cash_in  + Math.max(0, v) + Math.max(0, z) + Math.max(0, b);
+  const flowOut = tx.cash_out + Math.max(0,-v) + Math.max(0,-z) + Math.max(0,-b);
+  const tradeInMkt = ins.reduce((s, ci) => s + (ci.card_cm || ci.market_at_purchase || 0), 0);
+  const outVal = outs.reduce((s, co) => {
+    if (tx.type === 'trade') return s + (co.card_map || co.market_at_sale || 0);
+    return s + (co.card_bp || 0);
+  }, 0);
+  const mp = (flowIn + tradeInMkt) - (outVal + flowOut);
+  db.prepare('UPDATE transactions SET market_profit = ? WHERE id = ?').run(mp, txId);
+}
+
 app.put('/api/cards/:id', (req, res) => {
   const c = req.body;
-  db.prepare(`
-    UPDATE cards SET name=?, is_graded=?, grading_company=?, grade=?, condition_val=?,
-      buy_price=?, market_at_purchase=?, current_market=?, status=?, sale_price=?
-    WHERE id=?
-  `).run(
-    c.name, c.isGraded ? 1 : 0, c.gradingCompany || null, c.grade || null,
-    c.condition || null, c.buyPrice, c.marketAtPurchase, c.currentMarket,
-    c.status, c.salePrice ?? null, req.params.id
-  );
-  if (c.owners) saveOwnership(Number(req.params.id), c.owners);
+  const cardId = Number(req.params.id);
+
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE cards SET name=?, is_graded=?, grading_company=?, grade=?, condition_val=?,
+        buy_price=?, market_at_purchase=?, current_market=?, status=?, sale_price=?
+      WHERE id=?
+    `).run(
+      c.name, c.isGraded ? 1 : 0, c.gradingCompany || null, c.grade || null,
+      c.condition || null, c.buyPrice, c.marketAtPurchase, c.currentMarket,
+      c.status, c.salePrice ?? null, cardId
+    );
+    if (c.owners) saveOwnership(cardId, c.owners);
+
+    // Cascade to tx_cards_in (buy/trade-in snapshot)
+    const tciRow = db.prepare('SELECT id, transaction_id FROM tx_cards_in WHERE card_id = ?').get(cardId);
+    if (tciRow) {
+      db.prepare('UPDATE tx_cards_in SET buy_price=?, market_at_purchase=? WHERE id=?')
+        .run(c.buyPrice, c.marketAtPurchase, tciRow.id);
+
+      // Auto-sync cash_out for single-card buy transactions
+      const buyTx = db.prepare('SELECT id, type FROM transactions WHERE id = ?').get(tciRow.transaction_id);
+      if (buyTx && buyTx.type === 'buy') {
+        const cardCount = db.prepare('SELECT COUNT(*) as n FROM tx_cards_in WHERE transaction_id = ?').get(buyTx.id).n;
+        if (cardCount === 1) {
+          db.prepare('UPDATE transactions SET cash_out = ? WHERE id = ?').run(c.buyPrice, buyTx.id);
+        }
+      }
+
+      recalcMarketProfit(tciRow.transaction_id);
+    }
+
+    // Cascade to tx_cards_out (sale/trade-out snapshot)
+    const tcoRow = db.prepare('SELECT id, transaction_id FROM tx_cards_out WHERE card_id = ?').get(cardId);
+    if (tcoRow) {
+      db.prepare('UPDATE tx_cards_out SET sale_price=?, market_at_sale=? WHERE id=?')
+        .run(c.salePrice ?? null, c.currentMarket, tcoRow.id);
+      recalcMarketProfit(tcoRow.transaction_id);
+    }
+  })();
+
   res.json({ ok: true });
 });
 
@@ -880,7 +985,7 @@ app.get('/api/transactions', (req, res) => {
     cardsOut: outs.filter(r => r.transaction_id === t.id).map(r => ({
       id: r.card_id, name: r.name, grade: r.grade,
       isGraded: r.is_graded === 1,
-      currentMarket: r.current_market, salePrice: r.sale_price,
+      marketAtSale: r.market_at_sale, salePrice: r.sale_price,
       // Ownership stays on the card row in card_profiles even after sale — read it here
       owners: r.card_id ? ownership.filter(o => o.card_id === r.card_id).map(o => ({
         profileId: o.profile_id, name: o.name, color: o.color,
@@ -888,21 +993,27 @@ app.get('/api/transactions', (req, res) => {
       })) : [],
     })),
     cardsIn: ins.filter(r => r.transaction_id === t.id).map(r => {
-      // Find the inventory card that came in via this transaction (regardless of current status)
-      const card = db.prepare(
-        `SELECT id FROM cards WHERE transaction_id=? AND lower(name)=lower(?) LIMIT 1`
-      ).get(t.id, r.name);
-      const cardId = card ? card.id : null;
+      // Use the direct card_id FK if available, fall back to name match for legacy data
+      let cardId = r.card_id || null;
+      if (!cardId) {
+        const card = db.prepare(
+          `SELECT id FROM cards WHERE buy_transaction_id=? AND lower(name)=lower(?) LIMIT 1`
+        ).get(t.id, r.name);
+        cardId = card ? card.id : null;
+      }
+      const cardRow = cardId ? db.prepare('SELECT buy_price FROM cards WHERE id=?').get(cardId) : null;
       const cardOwners = cardId ? ownership.filter(o => o.card_id === cardId).map(o => ({
         profileId: o.profile_id, name: o.name, color: o.color,
         initials: o.initials, percentage: o.percentage,
       })) : [];
       return {
-        cardId, // include the actual inventory card ID
+        tciId: r.id,
+        cardId,
         name: r.name, isGraded: r.is_graded === 1,
         gradingCompany: r.grading_company, grade: r.grade,
-        condition: r.condition_val, buyPrice: r.buy_price,
-        marketAtPurchase: r.market_at_purchase, currentMarket: r.current_market,
+        condition: r.condition_val,
+        buyPrice: cardRow ? cardRow.buy_price : r.buy_price,
+        marketAtPurchase: r.market_at_purchase,
         owners: cardOwners,
       };
     }),
@@ -932,9 +1043,9 @@ app.post('/api/transactions', (req, res) => {
 
     for (const co of t.cardsOut) {
       db.prepare(`
-        INSERT INTO tx_cards_out (transaction_id, card_id, name, grade, is_graded, current_market, sale_price)
+        INSERT INTO tx_cards_out (transaction_id, card_id, name, grade, is_graded, market_at_sale, sale_price)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(txId, co.id, co.name, co.grade || null, co.isGraded ? 1 : 0, co.currentMarket, co.salePrice);
+      `).run(txId, co.id, co.name, co.grade || null, co.isGraded ? 1 : 0, co.marketAtSale, co.salePrice);
 
       // Pull the card's set identity before we mark it sold so we can do a
       // set-aware match against binder_inventory.
@@ -1008,20 +1119,21 @@ app.post('/api/transactions', (req, res) => {
     }
 
     for (const ci of t.cardsIn) {
-      db.prepare(`
-        INSERT INTO tx_cards_in (transaction_id, name, is_graded, grading_company, grade,
-          condition_val, buy_price, market_at_purchase, current_market)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(txId, ci.name, ci.isGraded ? 1 : 0, ci.gradingCompany || null, ci.grade || null,
-             ci.condition || null, ci.buyPrice, ci.marketAtPurchase, ci.currentMarket);
-
       // Cards coming in via trade/buy enter inventory with their ownership
       const newCardId = db.prepare(`
         INSERT INTO cards (name, is_graded, grading_company, grade, condition_val,
-          buy_price, market_at_purchase, current_market, status, transaction_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'in_stock', ?)
+          buy_price, market_at_purchase, current_market, status, transaction_id, buy_transaction_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'in_stock', ?, ?)
       `).run(ci.name, ci.isGraded ? 1 : 0, ci.gradingCompany || null, ci.grade || null,
-             ci.condition || null, ci.buyPrice, ci.marketAtPurchase, ci.currentMarket, txId).lastInsertRowid;
+             ci.condition || null, ci.buyPrice, ci.marketAtPurchase, ci.currentMarket, txId, txId).lastInsertRowid;
+
+      db.prepare(`
+        INSERT INTO tx_cards_in (transaction_id, card_id, name, is_graded, grading_company, grade,
+          condition_val, buy_price, market_at_purchase)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(txId, newCardId, ci.name, ci.isGraded ? 1 : 0, ci.gradingCompany || null, ci.grade || null,
+             ci.condition || null, ci.buyPrice, ci.marketAtPurchase);
+
       saveOwnership(newCardId, ci.owners);
     }
 
@@ -1047,19 +1159,45 @@ app.put('/api/transactions/:id', (req, res) => {
     }
 
     for (const co of t.cardsOut) {
-      db.prepare('UPDATE tx_cards_out SET sale_price=? WHERE transaction_id=? AND card_id=?')
-        .run(co.salePrice, id, co.id);
+      db.prepare('UPDATE tx_cards_out SET sale_price=?, market_at_sale=? WHERE transaction_id=? AND card_id=?')
+        .run(co.salePrice, co.marketAtSale ?? null, id, co.id);
       db.prepare('UPDATE cards SET sale_price=? WHERE id=?').run(co.salePrice, co.id);
       // Update ownership for cards that went out (they stay in card_profiles even after sale)
       if (co.owners && co.id) saveOwnership(co.id, co.owners);
     }
 
-    // Update ownership for cards that came in via trade/buy
+    // Update cards that came in via trade/buy — propagate cost basis + ownership
+    const affectedTxIds = new Set([Number(id)]);
     if (t.cardsIn && t.cardsIn.length) {
       for (const ci of t.cardsIn) {
         const cardId = ci.cardId || ci._cardId;
-        if (cardId && ci.owners && ci.owners.length) saveOwnership(cardId, ci.owners);
+        if (!cardId) continue;
+        if (ci.buyPrice != null) {
+          db.prepare('UPDATE cards SET buy_price=? WHERE id=?').run(ci.buyPrice, cardId);
+          db.prepare('UPDATE tx_cards_in SET buy_price=? WHERE id=?').run(ci.buyPrice, ci.tciId || 0);
+        }
+        if (ci.marketAtPurchase != null) {
+          db.prepare('UPDATE cards SET market_at_purchase=? WHERE id=?').run(ci.marketAtPurchase, cardId);
+          db.prepare('UPDATE tx_cards_in SET market_at_purchase=? WHERE id=?').run(ci.marketAtPurchase, ci.tciId || 0);
+        }
+        if (ci.owners && ci.owners.length) saveOwnership(cardId, ci.owners);
+        // Cascade to any sale/trade TX that references this card
+        const tcoRow = db.prepare('SELECT transaction_id FROM tx_cards_out WHERE card_id = ?').get(cardId);
+        if (tcoRow) affectedTxIds.add(tcoRow.transaction_id);
       }
+    }
+
+    // Also collect TXs affected by cardsOut edits
+    for (const co of t.cardsOut) {
+      if (co.id) {
+        const tciRow = db.prepare('SELECT transaction_id FROM tx_cards_in WHERE card_id = ?').get(co.id);
+        if (tciRow) affectedTxIds.add(tciRow.transaction_id);
+      }
+    }
+
+    // Recalculate market_profit for all affected transactions
+    for (const txId of affectedTxIds) {
+      recalcMarketProfit(txId);
     }
   })();
 
@@ -1074,6 +1212,14 @@ app.post('/api/transactions/:id/undo', (req, res) => {
   const tx = db.prepare('SELECT * FROM transactions WHERE id = ?').get(id);
   if (!tx) return res.status(404).json({ error: 'Transaction not found' });
 
+  // Safety: block undo if cards created by this TX were sold/traded in a later TX
+  const createdCards = db.prepare('SELECT id, name, status, transaction_id FROM cards WHERE buy_transaction_id = ?').all(id);
+  const downstream = createdCards.filter(c => c.status !== 'in_stock' && c.transaction_id !== id);
+  if (downstream.length > 0) {
+    const names = downstream.map(c => c.name).join(', ');
+    return res.status(400).json({ error: `Cannot undo — these cards were sold/traded in later transactions: ${names}. Undo those first.` });
+  }
+
   db.transaction(() => {
     // 1) Revert cards that went out back to in_stock, and re-credit any
     //    binder_inventory decrement that the original sale/trade applied.
@@ -1085,7 +1231,7 @@ app.post('/api/transactions/:id/undo', (req, res) => {
         // Pull set identity BEFORE flipping status (status flip doesn't touch
         // these columns, but read it here for symmetry with the sale path).
         const cardRow = db.prepare(
-          'SELECT name, set_name, set_number, purchase_price FROM cards WHERE id=?'
+          'SELECT name, set_name, set_number, buy_price FROM cards WHERE id=?'
         ).get(o.card_id);
 
         db.prepare(`
@@ -1133,7 +1279,7 @@ app.post('/api/transactions/:id/undo', (req, res) => {
               `INSERT INTO binder_inventory
                  (card_name, set_name, set_number, rarity, unit_price, quantity, first_seen_at, last_seen_at)
                VALUES (?, ?, ?, NULL, ?, 1, ?, ?)`
-            ).run(name, sName, sNum, cardRow.purchase_price || 0, now, now);
+            ).run(name, sName, sNum, cardRow.buy_price || 0, now, now);
             binderRestores.push(`${name}: binder row re-inserted (qty=1)`);
           }
         }
@@ -1144,11 +1290,12 @@ app.post('/api/transactions/:id/undo', (req, res) => {
     }
 
     // 2) Remove cards that came in via this transaction (and their ownership)
-    const tradeIns = db.prepare('SELECT id FROM cards WHERE transaction_id = ?').all(id);
+    //    Use buy_transaction_id (immutable) instead of transaction_id (overwritten on sale/trade)
+    const tradeIns = db.prepare('SELECT id FROM cards WHERE buy_transaction_id = ?').all(id);
     for (const c of tradeIns) {
       db.prepare('DELETE FROM card_profiles WHERE card_id=?').run(c.id);
     }
-    db.prepare('DELETE FROM cards WHERE transaction_id = ?').run(id);
+    db.prepare('DELETE FROM cards WHERE buy_transaction_id = ?').run(id);
 
     // 3) Clean up all linked records including images
     db.prepare('DELETE FROM tx_cards_out WHERE transaction_id = ?').run(id);
@@ -1245,6 +1392,7 @@ function dbToCard(c) {
     currentMarket: c.current_market,
     status: c.status,
     transactionId: c.transaction_id,
+    buyTransactionId: c.buy_transaction_id || null,
     salePrice: c.sale_price,
     imageUrl: c.image_url || null,
   };
@@ -1738,10 +1886,29 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
       // Collect affected in-stock cards so the client can show them in a confirm dialog.
       const affected = [];
       const inspect = (c, qty) => {
-        const rows = db.prepare(
-          `SELECT id, name, set_name, set_number, current_market FROM cards
-           WHERE lower(name)=lower(?) AND status='in_stock' LIMIT ?`
-        ).all(c.card_name, qty);
+        let rows = [];
+        if (c.set_name && c.set_number) {
+          rows = db.prepare(
+            `SELECT id, name, set_name, set_number, current_market FROM cards
+             WHERE set_name=? AND set_number=? AND status='in_stock' LIMIT ?`
+          ).all(c.set_name, c.set_number, qty);
+        }
+        if (rows.length < qty && c.set_name) {
+          const already = new Set(rows.map(r => r.id));
+          const more = db.prepare(
+            `SELECT id, name, set_name, set_number, current_market FROM cards
+             WHERE set_name=? AND name LIKE ? AND status='in_stock' LIMIT ?`
+          ).all(c.set_name, `%${c.card_name}%`, qty - rows.length);
+          for (const m of more) if (!already.has(m.id)) rows.push(m);
+        }
+        if (rows.length < qty) {
+          const already = new Set(rows.map(r => r.id));
+          const more = db.prepare(
+            `SELECT id, name, set_name, set_number, current_market FROM cards
+             WHERE name LIKE ? AND status='in_stock' LIMIT ?`
+          ).all(`%${c.card_name}%`, qty - rows.length);
+          for (const m of more) if (!already.has(m.id)) rows.push(m);
+        }
         for (const r of rows) affected.push(r);
       };
       for (const c of removed)  inspect(c, c.quantity);
@@ -1841,11 +2008,13 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
           // set_name/set_number columns we now persist.
           const richName = buildRichCardName(card.card_name, card.set_name, card.set_number, card.rarity);
 
+          const binderCardIds = [];
           for (let q = 0; q < card.quantity; q++) {
             const cardId = db.prepare(
-              `INSERT INTO cards (name, set_name, set_number, condition_val, buy_price, market_at_purchase, current_market, status, transaction_id)
-               VALUES (?,?,?,?,?,?,?,?,?)`
-            ).run(richName, card.set_name || null, card.set_number || null, 'Near Mint', unitCost, card.unit_price, card.unit_price, 'in_stock', txId).lastInsertRowid;
+              `INSERT INTO cards (name, set_name, set_number, condition_val, buy_price, market_at_purchase, current_market, status, transaction_id, buy_transaction_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?)`
+            ).run(richName, card.set_name || null, card.set_number || null, 'Near Mint', unitCost, card.unit_price, card.unit_price, 'in_stock', txId, txId).lastInsertRowid;
+            binderCardIds.push(cardId);
 
             if (owners && owners.length > 0) {
               for (const o of owners) {
@@ -1855,11 +2024,12 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
             }
           }
 
-          db.prepare(
-            `INSERT INTO tx_cards_in (transaction_id, name, condition_val, buy_price, market_at_purchase, current_market)
-             VALUES (?,?,?,?,?,?)`
-          ).run(txId, `${richName}${card.quantity > 1 ? ` ×${card.quantity}` : ''}`,
-            'Near Mint', unitCost, card.unit_price, card.unit_price);
+          for (const cid of binderCardIds) {
+            db.prepare(
+              `INSERT INTO tx_cards_in (transaction_id, card_id, name, condition_val, buy_price, market_at_purchase)
+               VALUES (?,?,?,?,?,?)`
+            ).run(txId, cid, richName, 'Near Mint', unitCost, card.unit_price);
+          }
         }
       }
 
@@ -1894,9 +2064,26 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
           const cardSaleTotal  = proceeds * proportion;
           const unitSalePrice  = card.quantity > 0 ? cardSaleTotal / card.quantity : cardSaleTotal;
 
-          const matchingCards = db.prepare(
-            `SELECT id, buy_price FROM cards WHERE name=? AND status='in_stock' LIMIT ?`
-          ).all(card.card_name, card.quantity);
+          let matchingCards = [];
+          if (card.set_name && card.set_number) {
+            matchingCards = db.prepare(
+              `SELECT id, buy_price FROM cards WHERE set_name=? AND set_number=? AND status='in_stock' LIMIT ?`
+            ).all(card.set_name, card.set_number, card.quantity);
+          }
+          if (matchingCards.length < card.quantity && card.set_name) {
+            const already = new Set(matchingCards.map(c => c.id));
+            const more = db.prepare(
+              `SELECT id, buy_price FROM cards WHERE set_name=? AND name LIKE ? AND status='in_stock' LIMIT ?`
+            ).all(card.set_name, `%${card.card_name}%`, card.quantity - matchingCards.length);
+            for (const m of more) if (!already.has(m.id)) matchingCards.push(m);
+          }
+          if (matchingCards.length < card.quantity) {
+            const already = new Set(matchingCards.map(c => c.id));
+            const more = db.prepare(
+              `SELECT id, buy_price FROM cards WHERE name LIKE ? AND status='in_stock' LIMIT ?`
+            ).all(`%${card.card_name}%`, card.quantity - matchingCards.length);
+            for (const m of more) if (!already.has(m.id)) matchingCards.push(m);
+          }
 
           for (const mc of matchingCards) {
             db.prepare(`UPDATE cards SET status='sold', sale_price=?, transaction_id=? WHERE id=?`)
@@ -1907,7 +2094,7 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
                   .run(mc.id, o.profileId, o.percentage);
               }
             }
-            db.prepare(`INSERT INTO tx_cards_out (transaction_id, card_id, name, current_market, sale_price)
+            db.prepare(`INSERT INTO tx_cards_out (transaction_id, card_id, name, market_at_sale, sale_price)
                         VALUES (?,?,?,?,?)`)
               .run(txId, mc.id, card.card_name, card.unit_price, unitSalePrice);
           }
@@ -1916,7 +2103,7 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
           const matched = matchingCards.length;
           const remaining = card.quantity - matched;
           for (let r = 0; r < remaining; r++) {
-            db.prepare(`INSERT INTO tx_cards_out (transaction_id, card_id, name, current_market, sale_price)
+            db.prepare(`INSERT INTO tx_cards_out (transaction_id, card_id, name, market_at_sale, sale_price)
                         VALUES (?,?,?,?,?)`)
               .run(txId, null, card.card_name, card.unit_price, unitSalePrice);
           }
@@ -1936,11 +2123,20 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
       //                lost / destroyed / gifted cards.
       if (hasRemovals && totalProceedsPreview === 0 && confirmRemovedNoSale) {
         const disposition = removedDisposition === 'sold' ? 'sold' : 'removed';
-        const doOne = (cardName, qty) => {
-          const matching = db.prepare(
-            `SELECT id, current_market FROM cards
-             WHERE lower(name)=lower(?) AND status='in_stock' LIMIT ?`
-          ).all(cardName, qty);
+        const doOne = (cardName, qty, setName, setNumber) => {
+          let matching = [];
+          if (setName && setNumber) {
+            matching = db.prepare(
+              `SELECT id, current_market FROM cards WHERE set_name=? AND set_number=? AND status='in_stock' LIMIT ?`
+            ).all(setName, setNumber, qty);
+          }
+          if (matching.length < qty) {
+            const already = new Set(matching.map(c => c.id));
+            const more = db.prepare(
+              `SELECT id, current_market FROM cards WHERE name LIKE ? AND status='in_stock' LIMIT ?`
+            ).all(`%${cardName}%`, qty - matching.length);
+            for (const m of more) if (!already.has(m.id)) matching.push(m);
+          }
           for (const mc of matching) {
             if (disposition === 'sold') {
               db.prepare('UPDATE cards SET status=?, sale_price=? WHERE id=?')
@@ -1951,8 +2147,8 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
             markRemovedAffectedOuter.push({ id: mc.id, name: cardName, disposition });
           }
         };
-        for (const c of removed) doOne(c.card_name, c.quantity);
-        for (const c of qtyDown) doOne(c.card_name, c.delta);
+        for (const c of removed) doOne(c.card_name, c.quantity, c.set_name, c.set_number);
+        for (const c of qtyDown) doOne(c.card_name, c.delta, c.set_name, c.set_number);
       }
 
       // ── Record import history ───────────────────────────────────────────────

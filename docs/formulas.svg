@@ -1,0 +1,243 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1700" font-family="Consolas, monospace" font-size="12">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/>
+    </marker>
+    <marker id="arr-g" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4ade80"/>
+    </marker>
+    <marker id="arr-y" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f5a623"/>
+    </marker>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0c0c14"/>
+      <stop offset="100%" stop-color="#08080e"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="1700" fill="url(#bgGrad)" rx="8"/>
+
+  <!-- Title -->
+  <text x="600" y="38" fill="#facc15" font-size="22" font-weight="bold" text-anchor="middle">CardLedger — All Formulas &amp; Calculations</text>
+  <text x="600" y="58" fill="#666" font-size="11" text-anchor="middle">How every number on the Analytics and Transactions tabs is computed</text>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- SECTION 1: ownerPct — The Equity Filter Engine              -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <rect x="40" y="80" width="1120" height="140" rx="6" fill="#111120" stroke="#facc1544" stroke-width="1.5"/>
+  <rect x="40" y="80" width="1120" height="30" rx="6" fill="#1a1a30"/>
+  <text x="600" y="100" fill="#facc15" font-size="14" font-weight="bold" text-anchor="middle">EQUITY CHIP FILTER — ownerPct(card, partnerFilters)</text>
+
+  <text x="60" y="132" fill="#ccc" font-size="11">When NO equity chips are selected (default):  ownerPct = 1.0  (100% — all values shown at full)</text>
+  <text x="60" y="152" fill="#ccc" font-size="11">When chip(s) selected (e.g. "Jason"):          ownerPct = sum of matching owner percentages / 100</text>
+  <text x="60" y="172" fill="#888" font-size="10">Example: Card owned 50% Jason + 50% Benny → clicking "Jason" chip → ownerPct = 0.5 → all values × 0.5</text>
+  <text x="60" y="192" fill="#888" font-size="10">If card has NO matching owners → ownerPct = 0 → card excluded from all stats. Sold cards also filtered by owner match.</text>
+
+  <text x="600" y="210" fill="#f5a623" font-size="10" text-anchor="middle">⬇ This multiplier flows into EVERY formula below marked with "× pct" ⬇</text>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- SECTION 2: ANALYTICS TAB — Top-Level Stats                  -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <rect x="40" y="240" width="1120" height="360" rx="6" fill="#0e0e1a" stroke="#4ade8044" stroke-width="1.5"/>
+  <rect x="40" y="240" width="1120" height="30" rx="6" fill="#0a1a10"/>
+  <text x="600" y="260" fill="#4ade80" font-size="14" font-weight="bold" text-anchor="middle">ANALYTICS TAB — Top Row Cards</text>
+
+  <!-- Revenue -->
+  <rect x="60" y="285" width="520" height="60" rx="4" fill="#0a0a14" stroke="#4ade8033"/>
+  <text x="75" y="303" fill="#4ade80" font-size="12" font-weight="bold">Revenue</text>
+  <text x="75" y="320" fill="#ccc" font-size="11">= Σ ( soldCard.salePrice × ownerPct )</text>
+  <text x="75" y="337" fill="#666" font-size="10">Only sold cards. Filtered by partner if equity chip active.</text>
+
+  <!-- Cost of Sold -->
+  <rect x="620" y="285" width="520" height="60" rx="4" fill="#0a0a14" stroke="#f8717133"/>
+  <text x="635" y="303" fill="#f87171" font-size="12" font-weight="bold">Cost of Sold</text>
+  <text x="635" y="320" fill="#ccc" font-size="11">= Σ ( soldCard.buyPrice × ownerPct )</text>
+  <text x="635" y="337" fill="#666" font-size="10">Original purchase cost of each sold card, scaled by ownership.</text>
+
+  <!-- Realized Profit -->
+  <rect x="60" y="360" width="520" height="60" rx="4" fill="#0a0a14" stroke="#4ade8033"/>
+  <text x="75" y="378" fill="#4ade80" font-size="12" font-weight="bold">Realized Profit</text>
+  <text x="75" y="395" fill="#ccc" font-size="11">= Revenue − Cost of Sold</text>
+  <text x="75" y="412" fill="#666" font-size="10">Actual profit from completed sales. Green if positive, red if negative.</text>
+
+  <!-- Unrealized Gain -->
+  <rect x="620" y="360" width="520" height="60" rx="4" fill="#0a0a14" stroke="#60a5fa33"/>
+  <text x="635" y="378" fill="#60a5fa" font-size="12" font-weight="bold">Unrealized Gain</text>
+  <text x="635" y="395" fill="#ccc" font-size="11">= Σ(inStock.currentMarket × pct) − Σ(inStock.marketAtPurchase × pct)</text>
+  <text x="635" y="412" fill="#666" font-size="10">Market movement since purchase for cards still in stock. NOT using buyPrice.</text>
+
+  <!-- Avg Intake % -->
+  <rect x="60" y="435" width="520" height="60" rx="4" fill="#0a0a14" stroke="#f5a62333"/>
+  <text x="75" y="453" fill="#f5a623" font-size="12" font-weight="bold">Avg Intake %</text>
+  <text x="75" y="470" fill="#ccc" font-size="11">= avg( buyPrice / marketAtPurchase × 100 )  for in-stock cards</text>
+  <text x="75" y="487" fill="#666" font-size="10">Only cards with marketAtPurchase > 0. Lower is better (bigger discount).</text>
+
+  <!-- Avg Sale % -->
+  <rect x="620" y="435" width="520" height="60" rx="4" fill="#0a0a14" stroke="#c084fc33"/>
+  <text x="635" y="453" fill="#c084fc" font-size="12" font-weight="bold">Avg Sale %</text>
+  <text x="635" y="470" fill="#ccc" font-size="11">= avg( salePrice / currentMarket × 100 )  for sold cards</text>
+  <text x="635" y="487" fill="#666" font-size="10">Only sold cards with both salePrice and currentMarket. Higher is better.</text>
+
+  <!-- Period Stats Note -->
+  <rect x="60" y="510" width="1080" height="40" rx="4" fill="#0a0a14" stroke="#55555533"/>
+  <text x="75" y="528" fill="#888" font-size="11" font-weight="bold">Period-Filtered Stats (same formulas, scoped to date range):</text>
+  <text x="75" y="543" fill="#666" font-size="10">periodRevenue, periodCost, periodProfit — same as above but using filteredSoldCards (date-filtered subset)</text>
+
+  <!-- Data source labels -->
+  <text x="60" y="577" fill="#555" font-size="10">Data sources:  visibleInStockCards = inventory search-filtered in-stock  |  soldCards = status ≠ "in_stock"  |  partnerFilters = selected equity chips</text>
+  <text x="60" y="591" fill="#555" font-size="10">Note: Unrealized Gain compares currentMarket vs marketAtPurchase, NOT vs buyPrice. This measures market movement, not your discount.</text>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- SECTION 3: ANALYTICS TAB — Per-Partner Breakdown            -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <rect x="40" y="610" width="1120" height="260" rx="6" fill="#0e0e1a" stroke="#c084fc44" stroke-width="1.5"/>
+  <rect x="40" y="610" width="1120" height="30" rx="6" fill="#10081a"/>
+  <text x="600" y="630" fill="#c084fc" font-size="14" font-weight="bold" text-anchor="middle">ANALYTICS TAB — Per-Partner Equity Breakdown</text>
+  <text x="600" y="648" fill="#666" font-size="10" text-anchor="middle">Calculated independently per profile — each partner gets their ownership % of each card (NOT affected by equity chips)</text>
+
+  <rect x="60" y="660" width="350" height="48" rx="4" fill="#0a0a14" stroke="#c084fc22"/>
+  <text x="75" y="678" fill="#c084fc" font-size="11" font-weight="bold">Portfolio Equity</text>
+  <text x="75" y="698" fill="#ccc" font-size="11">Σ( inStock.currentMarket × partnerPct )</text>
+
+  <rect x="430" y="660" width="350" height="48" rx="4" fill="#0a0a14" stroke="#f8717122"/>
+  <text x="445" y="678" fill="#f87171" font-size="11" font-weight="bold">Total Invested</text>
+  <text x="445" y="698" fill="#ccc" font-size="11">costInStock + costSold  (all buyPrices × pct)</text>
+
+  <rect x="800" y="660" width="340" height="48" rx="4" fill="#0a0a14" stroke="#60a5fa22"/>
+  <text x="815" y="678" fill="#60a5fa" font-size="11" font-weight="bold">Unrealized Gain</text>
+  <text x="815" y="698" fill="#ccc" font-size="11">equity − costInStock</text>
+
+  <rect x="60" y="722" width="350" height="48" rx="4" fill="#0a0a14" stroke="#4ade8022"/>
+  <text x="75" y="740" fill="#4ade80" font-size="11" font-weight="bold">Revenue (Sales)</text>
+  <text x="75" y="760" fill="#ccc" font-size="11">Σ( sold.salePrice × partnerPct )</text>
+
+  <rect x="430" y="722" width="350" height="48" rx="4" fill="#0a0a14" stroke="#f8717122"/>
+  <text x="445" y="740" fill="#f87171" font-size="11" font-weight="bold">Cost of Sold</text>
+  <text x="445" y="760" fill="#ccc" font-size="11">Σ( sold.buyPrice × partnerPct )</text>
+
+  <rect x="800" y="722" width="340" height="48" rx="4" fill="#0a0a14" stroke="#4ade8022"/>
+  <text x="815" y="740" fill="#4ade80" font-size="11" font-weight="bold">Realized Profit</text>
+  <text x="815" y="760" fill="#ccc" font-size="11">revenue − costSold</text>
+
+  <text x="60" y="800" fill="#888" font-size="10" font-weight="bold">Key difference from top-level stats:</text>
+  <text x="60" y="816" fill="#666" font-size="10">• partnerPct = partner's specific ownership % (from card_profiles), NOT ownerPct from equity chips</text>
+  <text x="60" y="832" fill="#666" font-size="10">• Unrealized Gain here = equity − costInStock (market vs buy_price), while top-level = currentMarket − marketAtPurchase (market movement)</text>
+  <text x="60" y="848" fill="#666" font-size="10">• Always shows all profiles — not affected by which equity chips are clicked</text>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- SECTION 4: TRANSACTIONS TAB — Per-Transaction Numbers       -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <rect x="40" y="880" width="1120" height="370" rx="6" fill="#0e0e1a" stroke="#f5a62344" stroke-width="1.5"/>
+  <rect x="40" y="880" width="1120" height="30" rx="6" fill="#1a1208"/>
+  <text x="600" y="900" fill="#f5a623" font-size="14" font-weight="bold" text-anchor="middle">TRANSACTIONS TAB — Per-Transaction Formulas</text>
+
+  <!-- Net Revenue -->
+  <rect x="60" y="925" width="540" height="80" rx="4" fill="#0a0a14" stroke="#f5a62333"/>
+  <text x="75" y="943" fill="#f5a623" font-size="12" font-weight="bold">Net Revenue  (legal tender only)</text>
+  <text x="75" y="963" fill="#ccc" font-size="11">= ( cashIn + max(0,venmo) + max(0,zelle) )</text>
+  <text x="85" y="980" fill="#ccc" font-size="11">− ( cashOut + max(0,−venmo) + max(0,−zelle) )</text>
+  <text x="75" y="997" fill="#666" font-size="10">Binder credit EXCLUDED. Only real money in minus real money out.</text>
+
+  <!-- Mkt Profit (stored) -->
+  <rect x="620" y="925" width="520" height="80" rx="4" fill="#0a0a14" stroke="#4ade8033"/>
+  <text x="635" y="943" fill="#4ade80" font-size="12" font-weight="bold">Mkt Profit  (uses stored tx.marketProfit if available)</text>
+  <text x="635" y="963" fill="#ccc" font-size="11">= ( flowIn + tradeInMarketValue ) − ( outCardValue + flowOut )</text>
+  <text x="635" y="980" fill="#666" font-size="10">Stored value from DB; fallback formula used if null (see below).</text>
+  <text x="635" y="997" fill="#666" font-size="10">This is the "value captured" metric — includes binder credit.</text>
+
+  <!-- flowIn / flowOut breakdown -->
+  <rect x="60" y="1020" width="540" height="90" rx="4" fill="#0a0a14" stroke="#55555533"/>
+  <text x="75" y="1038" fill="#888" font-size="11" font-weight="bold">flowIn  &amp;  flowOut  (money side of Mkt Profit)</text>
+  <text x="75" y="1058" fill="#ccc" font-size="11">flowIn  = cashIn  + max(0, venmo) + max(0, zelle) + max(0, binder)</text>
+  <text x="75" y="1075" fill="#ccc" font-size="11">flowOut = cashOut + max(0,−venmo) + max(0,−zelle) + max(0,−binder)</text>
+  <text x="75" y="1095" fill="#666" font-size="10">max(0,x) / max(0,−x) splits signed amounts into in vs out components.</text>
+
+  <!-- Card valuation breakdown -->
+  <rect x="620" y="1020" width="520" height="90" rx="4" fill="#0a0a14" stroke="#fb923c33"/>
+  <text x="635" y="1038" fill="#fb923c" font-size="11" font-weight="bold">Card Valuation  (card side of Mkt Profit)</text>
+  <text x="635" y="1058" fill="#ccc" font-size="11">tradeInMktVal = Σ cardsIn.currentMarket  (market value of cards received)</text>
+  <text x="635" y="1078" fill="#ccc" font-size="11">outCardValue  = Σ cardsOut valuation, where:</text>
+  <text x="650" y="1098" fill="#4ade80" font-size="10">SALE → card.buyPrice  |  TRADE → card.marketAtPurchase (Option B)</text>
+
+  <!-- Cost Basis (displayed in detail view) -->
+  <rect x="60" y="1125" width="1080" height="55" rx="4" fill="#0a0a14" stroke="#66666633"/>
+  <text x="75" y="1143" fill="#888" font-size="11" font-weight="bold">Cost Basis  (shown in TxDetailModal)</text>
+  <text x="75" y="1163" fill="#ccc" font-size="11">= cardsCostBasis + totalPaidOut        where totalPaidOut = cashOut + max(0,−venmo) + max(0,−zelle) + max(0,−binder)</text>
+  <text x="75" y="1173" fill="#666" font-size="10">cardsCostBasis uses same SALE/TRADE bifurcation as Mkt Profit outCardValue</text>
+
+  <!-- Option B callout -->
+  <rect x="60" y="1195" width="1080" height="44" rx="4" fill="#1a1008" stroke="#fb923c44"/>
+  <text x="75" y="1213" fill="#fb923c" font-size="11" font-weight="bold">⚡ Option B (Trade Fix)</text>
+  <text x="310" y="1213" fill="#ccc" font-size="11">When type='trade', outgoing cards valued at marketAtPurchase (not buyPrice)</text>
+  <text x="75" y="1230" fill="#666" font-size="10">Prevents double-counting buy discounts. The discount profit stays in the original buy TX, trade only captures market movement since acquisition.</text>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- SECTION 5: TRANSACTIONS TAB — Day Summary Banner            -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <rect x="40" y="1270" width="1120" height="220" rx="6" fill="#0e0e1a" stroke="#60a5fa44" stroke-width="1.5"/>
+  <rect x="40" y="1270" width="1120" height="30" rx="6" fill="#080e1a"/>
+  <text x="600" y="1290" fill="#60a5fa" font-size="14" font-weight="bold" text-anchor="middle">TRANSACTIONS TAB — Day Summary Banner (above TX list)</text>
+
+  <!-- Per-payment rows -->
+  <rect x="60" y="1315" width="540" height="100" rx="4" fill="#0a0a14" stroke="#55555533"/>
+  <text x="75" y="1333" fill="#888" font-size="11" font-weight="bold">Per-Payment Breakdown (Cash / Venmo / Zelle / Binder rows)</text>
+  <text x="75" y="1353" fill="#ccc" font-size="11">cashIn   = Σ filteredTx.cashIn</text>
+  <text x="75" y="1370" fill="#ccc" font-size="11">cashOut  = Σ filteredTx.cashOut</text>
+  <text x="75" y="1387" fill="#ccc" font-size="11">venmoIn  = Σ max(0, tx.venmoAmount)    venmoOut = Σ max(0, −tx.venmoAmount)</text>
+  <text x="75" y="1404" fill="#666" font-size="10">Same pattern for zelle and binder. Each row shows In / Out / Net.</text>
+
+  <!-- Summary row -->
+  <rect x="620" y="1315" width="520" height="100" rx="4" fill="#0a0a14" stroke="#f5a62333"/>
+  <text x="635" y="1333" fill="#f5a623" font-size="11" font-weight="bold">Summary Row (bottom of banner)</text>
+  <text x="635" y="1353" fill="#ccc" font-size="11">Total In   = cashIn + venmoIn + zelleIn + binderIn</text>
+  <text x="635" y="1370" fill="#ccc" font-size="11">Total Out  = cashOut + venmoOut + zelleOut + binderOut</text>
+  <text x="635" y="1387" fill="#ccc" font-size="11">Revenue    = Total In − Total Out</text>
+  <text x="635" y="1404" fill="#666" font-size="10">⚠ Note: This "Revenue" INCLUDES binder (unlike per-TX Net Revenue).</text>
+
+  <!-- dayNetCash + dayProfit -->
+  <rect x="60" y="1430" width="540" height="48" rx="4" fill="#0a0a14" stroke="#4ade8033"/>
+  <text x="75" y="1448" fill="#4ade80" font-size="11" font-weight="bold">dayNetCash  (internal — used for layout logic)</text>
+  <text x="75" y="1468" fill="#ccc" font-size="11">= (cashIn + venmoIn + zelleIn) − (cashOut + venmoOut + zelleOut)</text>
+
+  <rect x="620" y="1430" width="520" height="48" rx="4" fill="#0a0a14" stroke="#4ade8033"/>
+  <text x="635" y="1448" fill="#4ade80" font-size="11" font-weight="bold">Mkt Profit  (banner total)</text>
+  <text x="635" y="1468" fill="#ccc" font-size="11">= Σ tx.marketProfit  (sum of all filtered TXs' stored mkt profit)</text>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- SECTION 6: Legend / Key                                     -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <rect x="40" y="1510" width="1120" height="170" rx="6" fill="#111120" stroke="#33333366" stroke-width="1.5"/>
+  <rect x="40" y="1510" width="1120" height="30" rx="6" fill="#1a1a30"/>
+  <text x="600" y="1530" fill="#facc15" font-size="14" font-weight="bold" text-anchor="middle">DATA FLOW SUMMARY</text>
+
+  <!-- Column 1: Data Sources -->
+  <text x="60" y="1560" fill="#facc15" font-size="11" font-weight="bold">Data Sources</text>
+  <text x="60" y="1578" fill="#ccc" font-size="10">cards.buyPrice          → original cost basis</text>
+  <text x="60" y="1594" fill="#ccc" font-size="10">cards.salePrice         → what card sold for</text>
+  <text x="60" y="1610" fill="#ccc" font-size="10">cards.currentMarket     → latest market value</text>
+  <text x="60" y="1626" fill="#ccc" font-size="10">cards.marketAtPurchase  → market at time of buy</text>
+  <text x="60" y="1642" fill="#ccc" font-size="10">card_profiles.percentage → ownership split (0-100)</text>
+  <text x="60" y="1658" fill="#ccc" font-size="10">tx.marketProfit         → stored snapshot (recalculated on edit)</text>
+
+  <!-- Column 2: Key Distinctions -->
+  <text x="440" y="1560" fill="#facc15" font-size="11" font-weight="bold">Key Distinctions</text>
+  <text x="440" y="1578" fill="#4ade80" font-size="10">Net Revenue = legal tender only (no binder)</text>
+  <text x="440" y="1594" fill="#f5a623" font-size="10">Mkt Profit  = includes binder, measures value captured</text>
+  <text x="440" y="1610" fill="#60a5fa" font-size="10">Unrealized (top) = currentMarket − marketAtPurchase</text>
+  <text x="440" y="1626" fill="#c084fc" font-size="10">Unrealized (partner) = equity − costInStock</text>
+  <text x="440" y="1642" fill="#fb923c" font-size="10">Trade out cards → valued at marketAtPurchase (Option B)</text>
+  <text x="440" y="1658" fill="#888" font-size="10">Sale out cards → valued at buyPrice (original cost)</text>
+
+  <!-- Column 3: Equity Filter Effect -->
+  <text x="830" y="1560" fill="#facc15" font-size="11" font-weight="bold">Equity Chip Effects</text>
+  <text x="830" y="1578" fill="#ccc" font-size="10">Analytics top row: ALL values × ownerPct</text>
+  <text x="830" y="1594" fill="#ccc" font-size="10">Analytics partner: NOT affected (uses own %)</text>
+  <text x="830" y="1610" fill="#ccc" font-size="10">Txns tab: Filters TXs by card ownership</text>
+  <text x="830" y="1626" fill="#ccc" font-size="10">Txns per-TX: NOT scaled (shows full amounts)</text>
+  <text x="830" y="1642" fill="#ccc" font-size="10">Txns banner: Sums from filtered TX set</text>
+  <text x="830" y="1658" fill="#888" font-size="10">Inventory tab: search-filtered, pct applied</text>
+
+  <!-- Footer -->
+  <text x="600" y="1692" fill="#444" font-size="10" text-anchor="middle">Generated 2026-04-18  •  CardLedger formula reference  •  See also: docs/schema-proposed.svg for table relationships</text>
+</svg>

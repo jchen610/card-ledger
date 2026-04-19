@@ -733,15 +733,23 @@ function TxDetailModal({ tx, inventory, onClose, onEdit, onUndo, fmt, pct, pillC
   const venmo  = tx.venmoAmount || 0;
   const zelle  = tx.zelleAmount || 0;
   const binder = tx.binderAmount || 0;
-  const cardsCostBasis = tx.cardsOut.reduce((s,co)=>{ const inv=inventory.find(x=>x.id===co.id); return s+(inv?inv.buyPrice:0); }, 0);
+  const cardsCostBasis = tx.cardsOut.reduce((s,co)=>{
+    const inv=inventory.find(x=>x.id===co.id);
+    if (tx.type==='trade') return s+(inv?(inv.marketAtPurchase||inv.buyPrice):(co.marketAtSale||0));
+    return s+(inv?inv.buyPrice:0);
+  }, 0);
   const totalPaidOut   = tx.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle) + Math.max(0,-binder);
   const costBasis      = cardsCostBasis + totalPaidOut;
-  const netRevenue     = (tx.cashIn + Math.max(0,venmo) + Math.max(0,zelle) + Math.max(0,binder)) - (tx.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle) + Math.max(0,-binder));
+  const netRevenue     = (tx.cashIn + Math.max(0,venmo) + Math.max(0,zelle)) - (tx.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle));
   const txProfit       = tx.marketProfit != null ? tx.marketProfit : (() => {
     const flowIn  = tx.cashIn  + Math.max(0,venmo)  + Math.max(0,zelle) + Math.max(0,binder);
     const flowOut = tx.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle) + Math.max(0,-binder);
-    const tradeIn = (tx.cardsIn||[]).reduce((s,ci)=>s+(parseFloat(ci.currentMarket)||parseFloat(ci.marketAtPurchase)||0),0);
-    const basis   = tx.cardsOut.reduce((s,co)=>{ const inv=inventory.find(x=>x.id===co.id); return s+(inv?inv.buyPrice:0); },0);
+    const tradeIn = (tx.cardsIn||[]).reduce((s,ci)=>s+(parseFloat(ci.marketAtPurchase)||0),0);
+    const basis   = tx.cardsOut.reduce((s,co)=>{
+      const inv=inventory.find(x=>x.id===co.id);
+      if (tx.type==='trade') return s+(inv?(inv.marketAtPurchase||inv.buyPrice):(co.marketAtSale||0));
+      return s+(inv?inv.buyPrice:0);
+    },0);
     return (flowIn + tradeIn) - (basis + flowOut);
   })();
   const txTypeLabel = tx.type==="sale"?"SALE":tx.type==="trade"?"TRADE":"BUY";
@@ -800,7 +808,7 @@ function TxDetailModal({ tx, inventory, onClose, onEdit, onUndo, fmt, pct, pillC
             {tx.cardsOut.map((co,i)=>{
               const card = inventory.find(c=>c.id===co.id);
               const ip   = card&&card.marketAtPurchase>0?(card.buyPrice/card.marketAtPurchase)*100:null;
-              const sp   = co.salePrice!=null&&co.currentMarket>0?(co.salePrice/co.currentMarket)*100:null;
+              const sp   = co.salePrice!=null&&co.marketAtSale>0?(co.salePrice/co.marketAtSale)*100:null;
               return (
                 <div key={i} className="prev-row" style={{flexWrap:"wrap",gap:"3px 8px",marginBottom:6}}>
                   <span style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
@@ -817,7 +825,7 @@ function TxDetailModal({ tx, inventory, onClose, onEdit, onUndo, fmt, pct, pillC
                   <span style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                     {ip!=null&&<span className={`pct-pill ${pillCls(ip)}`}>in {pct(ip)}</span>}
                     {card?.buyPrice>0&&<span style={{color:"#666",fontSize:10}}>bought {fmt(card.buyPrice)}</span>}
-                    <span style={{color:"#555"}}>mkt {fmt(co.currentMarket||0)}</span>
+                    <span style={{color:"#555"}}>mkt {fmt(co.marketAtSale||0)}</span>
                     {co.salePrice!=null&&<span style={{color:"#e8e4d9",fontWeight:700}}>→ {fmt(co.salePrice)}</span>}
                     {sp!=null&&<span className={`pct-pill ${salePillCls(sp)}`}>{pct(sp)}</span>}
                   </span>
@@ -832,7 +840,7 @@ function TxDetailModal({ tx, inventory, onClose, onEdit, onUndo, fmt, pct, pillC
           <div>
             <div style={{fontSize:9,color:"#4ade80",letterSpacing:1.5,textTransform:"uppercase",marginBottom:8}}>Cards In</div>
             {tx.cardsIn.map((ci,i)=>{
-              const card  = inventory.find(c=>c.transactionId===tx.id&&(c.name||'').toLowerCase()===(ci.name||'').toLowerCase());
+              const card  = ci.cardId ? inventory.find(c=>c.id===ci.cardId) : inventory.find(c=>c.transactionId===tx.id&&(c.name||'').toLowerCase()===(ci.name||'').toLowerCase());
               const ip    = parseFloat(ci.marketAtPurchase)>0?(parseFloat(ci.buyPrice)/parseFloat(ci.marketAtPurchase))*100:null;
               const owners= card?.owners||[];
               return (
@@ -849,7 +857,7 @@ function TxDetailModal({ tx, inventory, onClose, onEdit, onUndo, fmt, pct, pillC
                     ))}
                   </span>
                   <span style={{display:"flex",gap:8,alignItems:"center"}}>
-                    <span style={{color:"#555"}}>mkt {fmt(parseFloat(ci.currentMarket)||parseFloat(ci.marketAtPurchase)||0)}</span>
+                    <span style={{color:"#555"}}>mkt {fmt(parseFloat(ci.marketAtPurchase)||0)}</span>
                     {ip!=null&&<span className={`pct-pill ${pillCls(ip)}`}>in {pct(ip)}</span>}
                     {parseFloat(ci.buyPrice)>0&&<span style={{color:"#666",fontSize:10}}>bought {fmt(parseFloat(ci.buyPrice))}</span>}
                   </span>
@@ -901,11 +909,12 @@ function TxDetailModal({ tx, inventory, onClose, onEdit, onUndo, fmt, pct, pillC
 }
 
 // ─── CardDetailModal ──────────────────────────────────────────────────────────
-function CardDetailModal({ card, transactions, inventory, onClose, reload, fmt, pct, pillCls, salePillCls, toTitleCase, GradeTag }) {
+function CardDetailModal({ card, transactions, inventory, onClose, reload, fmt, pct, pillCls, salePillCls, toTitleCase, GradeTag, onEditTx, onEditCard }) {
   const [cardImgUrl, setCardImgUrl] = useState(card.imageUrl || '');
   const [imgSaving,  setImgSaving]  = useState(false);
 
-  const inTx  = card.transactionId ? transactions.find(t => t.id === card.transactionId) : null;
+  const buyTx = card.buyTransactionId ? transactions.find(t => t.id === card.buyTransactionId) : null;
+  const inTx  = buyTx || (card.transactionId ? transactions.find(t => t.id === card.transactionId) : null);
   const outTx = transactions.find(t => t.cardsOut.some(co => co.id === card.id));
   const relTx = [...new Map([inTx, outTx].filter(Boolean).map(t => [t.id, t])).values()];
 
@@ -931,10 +940,14 @@ function CardDetailModal({ card, transactions, inventory, onClose, reload, fmt, 
             </div>
             <div style={{marginTop:4}}><GradeTag card={card}/></div>
           </div>
-          <span className="tag" style={{background:card.status==="in_stock"?"#14532d44":"#43140744",
-            color:card.status==="in_stock"?"#4ade80":"#fb923c",alignSelf:"flex-start"}}>
-            {card.status.replace("_"," ").toUpperCase()}
-          </span>
+          <div style={{display:"flex",gap:6,alignItems:"center",alignSelf:"flex-start"}}>
+            {onEditCard && <span className="edit-btn" style={{fontSize:10,padding:"3px 8px",cursor:"pointer"}}
+              onClick={()=>{onClose();onEditCard(card);}}>✎ Edit</span>}
+            <span className="tag" style={{background:card.status==="in_stock"?"#14532d44":"#43140744",
+              color:card.status==="in_stock"?"#4ade80":"#fb923c"}}>
+              {card.status.replace("_"," ").toUpperCase()}
+            </span>
+          </div>
         </div>
 
         {/* Card image */}
@@ -1001,7 +1014,11 @@ function CardDetailModal({ card, transactions, inventory, onClose, reload, fmt, 
                       <span style={{fontSize:11,color:"#aaa"}}>{tx.date}</span>
                       {tx.notes&&<span style={{fontSize:10,color:"#666"}}>📍 {tx.notes}</span>}
                     </div>
-                    <span style={{fontSize:9,color:"#333"}}>#{tx.id}</span>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                      {onEditTx && <span className="edit-btn" style={{fontSize:9,padding:"2px 6px"}}
+                        onClick={()=>{onClose();onEditTx(tx);}}>✎ Edit TX</span>}
+                      <span style={{fontSize:9,color:"#333"}}>#{tx.id}</span>
+                    </div>
                   </div>
                   {tx.type==="buy"&&<div style={{fontSize:11,color:"#aaa"}}>
                     Bought for <span style={{color:"#f87171",fontWeight:700}}>{fmt(card.buyPrice)}</span>
@@ -1638,7 +1655,7 @@ export default function App() {
   const [binderDetail,  setBinderDetail]  = useState(null);
   const [txTypeFilter,  setTxTypeFilter]  = useState('');
   const [txPayFilter,   setTxPayFilter]   = useState('');
-  const [txPartnerFilter, setTxPartnerFilter] = useState('');
+  const [txSearchFilter, setTxSearchFilter] = useState('');
 
   // Binder state
   const [binderSearch,      setBinderSearch]      = useState('');
@@ -1803,7 +1820,7 @@ export default function App() {
   const txCashOut = txCashDir==="out" ? txCashAmt : "";
   const cashInVal     = toF(txCashAmt) * (txCashDir==="in" ? 1 : 0);
   const totalMktOut   = txCardsOut.reduce((s,c) => s+(c.currentMarket||0), 0);
-  const totalMktIn    = txCardsIn.reduce((s,c) => s+(toF(c.tradedAtPrice)||toF(c.currentMarket)||toF(c.marketAtPurchase)||0), 0);
+  const totalMktIn    = txCardsIn.reduce((s,c) => s+(toF(c.tradedAtPrice)||toF(c.marketAtPurchase)||0), 0);
   const cardsSaleSum  = txCardsOut.reduce((s,c) => s+(toF(c.tradedAtPrice)||0), 0);
   const autoSaleTotal = txType === "sale"
     ? (toF(txFinalPrice) > 0 ? toF(txFinalPrice) : cardsSaleSum) : 0;
@@ -1991,7 +2008,8 @@ export default function App() {
       if (exists) return prev.filter(c => c.id !== card.id);
       return [...prev, {
         id:card.id, name:card.name, isGraded:card.isGraded, grade:card.grade,
-        currentMarket:card.currentMarket, marketAtPurchase:card.marketAtPurchase,
+        currentMarket:card.currentMarket, marketAtSale:card.currentMarket,
+        marketAtPurchase:card.marketAtPurchase,
         buyPrice:card.buyPrice,
         tradedAtPrice:String(card.currentMarket||""),
       }];
@@ -2004,7 +2022,7 @@ export default function App() {
 
   function handleAddTradeCard() {
     if (!newTradeCard.name.trim()) return;
-    const mkt = newTradeCard.currentMarketTouched ? toF(newTradeCard.currentMarket) : toF(newTradeCard.marketAtPurchase);
+    const mkt = toF(newTradeCard.marketAtPurchase);
     const agreedPrice = toF(newTradeCard.buyPrice) || mkt;
     const qty = Math.max(1, parseInt(newTradeCardQty || "1", 10) || 1);
     const card = {
@@ -2030,7 +2048,7 @@ export default function App() {
     const perCardTotal   = txCardsOut.reduce((s,c) => s+(toF(c.tradedAtPrice)||0), 0);
     // For trade: compute raw balance to determine which direction auto should fill
     const myVal          = txType==='trade' ? (toF(txFinalPrice)>0 ? toF(txFinalPrice) : perCardTotal) : 0;
-    const theirValBase   = txType==='trade' ? txCardsIn.reduce((s,c)=>s+(toF(c.tradedAtPrice)||toF(c.currentMarket)||toF(c.marketAtPurchase)||0),0) : 0;
+    const theirValBase   = txType==='trade' ? txCardsIn.reduce((s,c)=>s+(toF(c.tradedAtPrice)||toF(c.marketAtPurchase)||0),0) : 0;
     const theirVal       = txType==='trade' && toF(txInFinalPrice)>0 ? toF(txInFinalPrice) : theirValBase;
     const tradeDiff      = myVal - theirVal; // >0 = they owe us, <0 = we owe them
     // refTotal for sale = txFinalPrice or per-card sum
@@ -2100,8 +2118,8 @@ export default function App() {
       if (hasPerCard || txType==='trade') return toF(card.tradedAtPrice)||card.currentMarket||0;
       return totalMkt>0 ? (card.currentMarket/totalMkt)*totalFlowIn : 0;
     };
-    const costBasis    = txCardsOut.reduce((s,c) => s+(c.buyPrice||0), 0);
-    const mktIn        = txCardsIn.reduce((s,c) => s+(toF(c.currentMarket)||toF(c.marketAtPurchase)||0), 0);
+    const costBasis    = txCardsOut.reduce((s,c) => s+(txType==='trade' ? (c.marketAtPurchase||0) : (c.buyPrice||0)), 0);
+    const mktIn        = txCardsIn.reduce((s,c) => s+(toF(c.marketAtPurchase)||0), 0);
     const marketProfit = (totalFlowIn + mktIn) - (costBasis + totalFlowOut);
     await api('/api/transactions', { method:'POST', body:{
       type:txType, date:txDate, notes, cashIn, cashOut, marketProfit, imageUrl:txImageUrl || null,
@@ -2109,8 +2127,19 @@ export default function App() {
       venmoAmount: venmoFinal || null,
       zelleAmount: zelleFinal || null,
       binderAmount: binderAmt,
-      cardsOut: txCardsOut.map(c => ({...c, salePrice:getSalePrice(c)})),
-      cardsIn:  txCardsIn,
+      cardsOut: txCardsOut.map(c => ({...c, salePrice:getSalePrice(c), marketAtSale:c.currentMarket})),
+      cardsIn:  (()=>{
+        const inRef = toF(txInFinalPrice);
+        const bpSum = txCardsIn.reduce((s,c) => s + toF(c.buyPrice), 0);
+        const needsProrate = inRef > 0 && Math.abs(bpSum - inRef) > 0.01;
+        const totalIn = txCardsIn.reduce((s,x) => s + (toF(x.tradedAtPrice) || toF(x.marketAtPurchase) || 0), 0);
+        return txCardsIn.map(c => {
+          const base = toF(c.tradedAtPrice) || toF(c.marketAtPurchase) || 0;
+          if (needsProrate && totalIn > 0) return { ...c, buyPrice: (base / totalIn) * inRef };
+          if (toF(c.buyPrice) > 0) return c;
+          return { ...c, buyPrice: base };
+        });
+      })(),
     }});
 
     setTxNotes(''); setTxCashAmt(''); setTxCashDir('in'); setTxImageUrl('');
@@ -2152,7 +2181,8 @@ export default function App() {
       cardsIn: tx.cardsIn || [],
       cardsOut: tx.cardsOut.map(c => ({...c,
         salePrice:     String(c.salePrice ?? ''),
-        tradedAtPrice: String(c.salePrice ?? c.currentMarket ?? ''),
+        marketAtSale:  String(c.marketAtSale ?? ''),
+        tradedAtPrice: String(c.salePrice ?? c.marketAtSale ?? ''),
       })),
     });
   }
@@ -2164,17 +2194,19 @@ export default function App() {
     const venmo      = toF(editTx.venmoAmount) || 0;
     const zelle      = toF(editTx.zelleAmount) || 0;
     const binder     = toF(editTx.binderAmount) || 0;
-    const updatedOut = editTx.cardsOut.map(c => ({...c, salePrice:toF(c.salePrice)}));
+    const updatedOut = editTx.cardsOut.map(c => ({...c, salePrice:toF(c.salePrice), marketAtSale:toF(c.marketAtSale) || undefined}));
 
-    // Full cost basis: what we originally paid for cards going out
+    // For trades: use market_at_purchase (what the card was worth when acquired)
+    // For sales: use buy_price (original cost basis — captures total realized gain)
     const costBasis = updatedOut.reduce((s,c) => {
       const inv = inventory.find(x => x.id === c.id);
+      if (editTx.type === 'trade') return s + (inv ? (inv.marketAtPurchase || inv.buyPrice) : (c.marketAtSale||0));
       return s + (inv ? inv.buyPrice : (c.buyPrice||0));
     }, 0);
 
     // Market value of cards coming in (trade)
     const mktIn = (editTx.cardsIn||[]).reduce((s,c) =>
-      s + (toF(c.currentMarket)||toF(c.marketAtPurchase)||0), 0);
+      s + (toF(c.marketAtPurchase)||0), 0);
 
     // Total money in / out across all payment methods (including binder)
     const totalIn  = cashIn  + Math.max(0, venmo)  + Math.max(0, zelle) + Math.max(0, binder);
@@ -2183,6 +2215,12 @@ export default function App() {
     // marketProfit = (all cash in + trade-in market value) - (cost basis of cards out + all cash out)
     const marketProfit = (totalIn + mktIn) - (costBasis + totalOut);
 
+    const updatedIn = (editTx.cardsIn || []).map(c => ({
+      ...c,
+      buyPrice: toF(c.buyPrice),
+      marketAtPurchase: toF(c.marketAtPurchase) || undefined,
+    }));
+
     await api(`/api/transactions/${editTx.id}`, { method:'PUT', body:{
       date:        editTx.date,
       notes:       editTx.notes,
@@ -2190,7 +2228,7 @@ export default function App() {
       cashOut,
       marketProfit,
       cardsOut:    updatedOut,
-      cardsIn:     editTx.cardsIn || [],
+      cardsIn:     updatedIn,
       imageUrl:    editTx.imageUrl || null,
       paymentMethod: editTx.paymentMethod || null,
       venmoAmount: venmo || null,
@@ -2203,7 +2241,8 @@ export default function App() {
 
   async function handleUndoTransaction(id) {
     if (!window.confirm("Undo this transaction? Cards will be returned to inventory and trade-ins removed.")) return;
-    await api(`/api/transactions/${id}/undo`, { method:'POST' });
+    const r = await fetch(`/api/transactions/${id}/undo`, { method:'POST', headers:{"Content-Type":"application/json"} });
+    if (!r.ok) { const body = await r.json().catch(()=>({})); alert(body.error || `Undo failed (${r.status})`); return; }
     await reload();
   }
 
@@ -3090,6 +3129,8 @@ export default function App() {
         {view === "transactions" && (() => {
           const allFilteredTx = txFilterMode==="all"
             ? [...transactions].reverse()
+            : txFilterMode==="month"
+            ? [...transactions].filter(t=>t.date.startsWith(txDateFilter.slice(0,7))).reverse()
             : [...transactions].filter(t=>t.date===txDateFilter).reverse();
           // Partner filter: show only transactions involving any selected partner's cards
           let filteredTx = partnerFilters.length
@@ -3109,7 +3150,18 @@ export default function App() {
             if (txPayFilter==='binder') return (t.binderAmount||0) !== 0;
             return true;
           });
-          if (txPartnerFilter) filteredTx = filteredTx.filter(t => (t.counterparty||'').toLowerCase().includes(txPartnerFilter.toLowerCase()));
+          if (txSearchFilter) {
+            const q = txSearchFilter.trim().replace(/^#/, '');
+            if (/^\d+$/.test(q)) {
+              filteredTx = filteredTx.filter(t => String(t.id) === q);
+            } else {
+              filteredTx = filteredTx.filter(t =>
+                (t.notes||'').toLowerCase().includes(q.toLowerCase()) ||
+                t.cardsOut.some(co => (co.name||'').toLowerCase().includes(q.toLowerCase())) ||
+                (t.cardsIn||[]).some(ci => (ci.name||'').toLowerCase().includes(q.toLowerCase()))
+              );
+            }
+          }
           const dayCashIn    = filteredTx.reduce((s,t)=>s+t.cashIn,0);
           const dayCashOut   = filteredTx.reduce((s,t)=>s+t.cashOut,0);
           const dayVenmoIn   = filteredTx.reduce((s,t)=>s+Math.max(0,t.venmoAmount||0),0);
@@ -3126,7 +3178,7 @@ export default function App() {
             const b = t.binderAmount || 0;
             const flowIn  = t.cashIn  + Math.max(0,v) + Math.max(0,z) + Math.max(0,b);
             const flowOut = t.cashOut + Math.max(0,-v) + Math.max(0,-z) + Math.max(0,-b);
-            const tradeIn = t.cardsIn.reduce((cs,ci)=>cs+(toF(ci.currentMarket)||toF(ci.marketAtPurchase)||0),0);
+            const tradeIn = t.cardsIn.reduce((cs,ci)=>cs+(toF(ci.marketAtPurchase)||0),0);
             const basis   = t.cardsOut.reduce((cs,co)=>{const inv=inventory.find(x=>x.id===co.id);return cs+(inv?inv.buyPrice:0);},0);
             return s + (flowIn + tradeIn) - (basis + flowOut);
           },0);
@@ -3140,7 +3192,7 @@ export default function App() {
                 <h2 className="section-title">TRANSACTIONS</h2>
                 <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                   <div style={{display:"flex",border:"1px solid #252535",borderRadius:3,overflow:"hidden"}}>
-                    {[{k:"day",l:"📅 Day"},{k:"all",l:"All Time"}].map(m=>(
+                    {[{k:"day",l:"📅 Day"},{k:"month",l:"📆 Month"},{k:"all",l:"All Time"}].map(m=>(
                       <button key={m.k} onClick={()=>setTxFilterMode(m.k)}
                         style={{background:txFilterMode===m.k?"#f5a623":"#141420",color:txFilterMode===m.k?"#0a0a0f":"#666",border:"none",padding:"6px 12px",cursor:"pointer",fontFamily:"'Space Mono',monospace",fontSize:10,letterSpacing:1,textTransform:"uppercase",fontWeight:txFilterMode===m.k?700:400}}>
                         {m.l}
@@ -3148,6 +3200,7 @@ export default function App() {
                     ))}
                   </div>
                   {txFilterMode==="day" && <input type="date" className="input" value={txDateFilter} onChange={e=>setTxDateFilter(e.target.value)} style={{width:"auto",padding:"6px 10px"}}/>}
+                  {txFilterMode==="month" && <input type="month" className="input" value={txDateFilter.slice(0,7)} onChange={e=>setTxDateFilter(e.target.value+"-01")} style={{width:"auto",padding:"6px 10px"}}/>}
                   <button className="btn btn-ghost" onClick={()=>openTxModal("sale")}>💰 Sale</button>
                   <button className="btn btn-ghost" onClick={()=>openTxModal("trade")}>⇄ Trade</button>
                 </div>
@@ -3167,12 +3220,31 @@ export default function App() {
                   <option value="zelle">Zelle</option>
                   <option value="binder">Binder</option>
                 </select>
-                <input className="input" placeholder="Partner..." value={txPartnerFilter} onChange={e=>setTxPartnerFilter(e.target.value)}
+                <input className="input" placeholder="#123 or card name..." value={txSearchFilter} onChange={e=>setTxSearchFilter(e.target.value)}
                   style={{width:140,padding:'4px 8px',fontSize:11}}/>
-                {(txTypeFilter||txPayFilter||txPartnerFilter) && (
-                  <button className="btn btn-ghost btn-sm" onClick={()=>{setTxTypeFilter('');setTxPayFilter('');setTxPartnerFilter('');}}>clear</button>
+                {(txTypeFilter||txPayFilter||txSearchFilter) && (
+                  <button className="btn btn-ghost btn-sm" onClick={()=>{setTxTypeFilter('');setTxPayFilter('');setTxSearchFilter('');}}>clear</button>
                 )}
               </div>
+
+              {txFilterMode==="month" && txMonths.length>0 && (
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+                  {txMonths.map(m=>{
+                    const mTx = transactions.filter(t=>t.date.startsWith(m));
+                    const rev = mTx.reduce((s,t)=>s+(t.cashIn+Math.max(0,t.venmoAmount||0)+Math.max(0,t.zelleAmount||0)+Math.max(0,t.binderAmount||0))-(t.cashOut+Math.max(0,-(t.venmoAmount||0))+Math.max(0,-(t.zelleAmount||0))+Math.max(0,-(t.binderAmount||0))),0);
+                    const isA = txDateFilter.startsWith(m);
+                    const label = new Date(m+"-15").toLocaleString('default',{month:'short',year:'numeric'});
+                    return (
+                      <button key={m} onClick={()=>setTxDateFilter(m+"-01")}
+                        style={{background:isA?"#1a1208":"#111118",border:isA?"1px solid #f5a623":"1px solid #1e1e28",borderRadius:3,padding:"5px 12px",cursor:"pointer",fontFamily:"'Space Mono',monospace",fontSize:10,color:isA?"#f5a623":"#777",display:"flex",gap:8,alignItems:"center"}}>
+                        <span>{label}</span>
+                        <span style={{color:rev>=0?"#f5a623":"#f87171",fontWeight:700}}>{rev>=0?"+":"-"}{fmt(rev)}</span>
+                        <span style={{color:"#444"}}>{mTx.length}tx</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
 
               {txFilterMode==="day" && txDates.length>0 && (
                 <div style={{marginBottom:14}}>
@@ -3326,7 +3398,7 @@ export default function App() {
 
               {filteredTx.length===0 && (
                 <div className="empty">
-                  {transactions.length===0 ? "No transactions yet." : txFilterMode==="day" ? `No transactions on ${txDateFilter}.` : "No transactions."}
+                  {transactions.length===0 ? "No transactions yet." : txFilterMode==="day" ? `No transactions on ${txDateFilter}.` : txFilterMode==="month" ? `No transactions in ${txDateFilter.slice(0,7)}.` : "No transactions."}
                 </div>
               )}
 
@@ -3336,23 +3408,30 @@ export default function App() {
               )}
 
               {filteredTx.slice(txPage*txPP, (txPage+1)*txPP).map(t => {
-                const cardsCostBasis = t.cardsOut.reduce((s,co)=>{const inv=inventory.find(x=>x.id===co.id);return s+(inv?inv.buyPrice:0);},0);
+                const cardsCostBasis = t.cardsOut.reduce((s,co)=>{
+                  const inv=inventory.find(x=>x.id===co.id);
+                  if (t.type==='trade') return s+(inv?(inv.marketAtPurchase||inv.buyPrice):(co.marketAtSale||0));
+                  return s+(inv?inv.buyPrice:0);
+                },0);
                 const venmo       = t.venmoAmount || 0;
                 const zelle       = t.zelleAmount || 0;
                 const binder      = t.binderAmount || 0;
                 const totalPaidOut = t.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle) + Math.max(0,-binder);
-                // Cost basis = original buy prices of cards going out + any cash/venmo/zelle/binder paid out
                 const costBasis   = cardsCostBasis + totalPaidOut;
-                const netRevenue  = (t.cashIn + Math.max(0,venmo) + Math.max(0,zelle) + Math.max(0,binder))
-                                  - (t.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle) + Math.max(0,-binder));
+                const netRevenue  = (t.cashIn + Math.max(0,venmo) + Math.max(0,zelle))
+                                  - (t.cashOut + Math.max(0,-venmo) + Math.max(0,-zelle));
                 const txProfit  = t.marketProfit != null ? t.marketProfit : (()=>{
                   const v = t.venmoAmount || 0;
                   const z = t.zelleAmount || 0;
                   const b = t.binderAmount || 0;
                   const flowIn  = t.cashIn  + Math.max(0,v)  + Math.max(0,z) + Math.max(0,b);
                   const flowOut = t.cashOut + Math.max(0,-v) + Math.max(0,-z) + Math.max(0,-b);
-                  const tradeIn = (t.cardsIn||[]).reduce((s,ci)=>s+(toF(ci.currentMarket)||toF(ci.marketAtPurchase)||0),0);
-                  const basis   = t.cardsOut.reduce((s,co)=>{const inv=inventory.find(x=>x.id===co.id);return s+(inv?inv.buyPrice:0);},0);
+                  const tradeIn = (t.cardsIn||[]).reduce((s,ci)=>s+(toF(ci.marketAtPurchase)||0),0);
+                  const basis   = t.cardsOut.reduce((s,co)=>{
+                    const inv=inventory.find(x=>x.id===co.id);
+                    if (t.type==='trade') return s+(inv?(inv.marketAtPurchase||inv.buyPrice):(co.marketAtSale||0));
+                    return s+(inv?inv.buyPrice:0);
+                  },0);
                   return (flowIn + tradeIn) - (basis + flowOut);
                 })();
                 // BUG FIX: added "BUY" case
@@ -3366,7 +3445,8 @@ export default function App() {
                       onClick={()=>setDetailTx(t)}>
                       <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",flex:1,minWidth:0}}>
                         <span className="tag" style={{background:txTagBg,color:txTagColor,flexShrink:0}}>{txTypeLabel}</span>
-                        {txFilterMode==="all" && <span style={{fontSize:11,color:"#555",flexShrink:0}}>{t.date}</span>}
+                        <span style={{fontSize:10,color:"#444",fontFamily:"'Space Mono',monospace",flexShrink:0}}>#{t.id}</span>
+                        {(txFilterMode==="all"||txFilterMode==="month") && <span style={{fontSize:11,color:"#555",flexShrink:0}}>{t.date}</span>}
                         {t.notes && <span style={{fontSize:11,color:"#888",background:"#1a1a10",border:"1px solid #2a2a18",borderRadius:3,padding:"1px 8px"}}>📍 {t.notes}</span>}
                         {t.imageUrl && <span style={{fontSize:10,color:"#555"}}>📷</span>}
                         {t.paymentMethod && t.paymentMethod.split(',').map(pm=>pm.trim()).filter(Boolean).map(pm=>{
@@ -3406,7 +3486,7 @@ export default function App() {
                         {t.cardsOut.map((co,i)=>{
                           const card=inventory.find(c=>c.id===co.id);
                           const ip=card&&card.marketAtPurchase>0?(card.buyPrice/card.marketAtPurchase)*100:null;
-                          const sp=co.salePrice!=null&&co.currentMarket>0?(co.salePrice/co.currentMarket)*100:null;
+                          const sp=co.salePrice!=null&&co.marketAtSale>0?(co.salePrice/co.marketAtSale)*100:null;
                           return <div key={i} className="prev-row" style={{flexWrap:"wrap",gap:"3px 8px"}}>
                             <span style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                               <span style={{color:"#e8e4d9",fontWeight:700,fontSize:13,cursor:"pointer"}}
@@ -3425,7 +3505,7 @@ export default function App() {
                             <span style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                               {ip!=null&&<span className={`pct-pill ${pillCls(ip)}`}>in {pct(ip)}</span>}
                               {card?.buyPrice>0&&<span style={{color:"#666",fontSize:10}}>bought {fmt(card.buyPrice)}</span>}
-                              <span style={{color:"#555"}}>mkt {fmt(co.currentMarket||0)}</span>
+                              <span style={{color:"#555"}}>mkt {fmt(co.marketAtSale||0)}</span>
                               {co.salePrice!=null&&<span style={{color:"#e8e4d9",fontWeight:700}}>→ {fmt(co.salePrice)}</span>}
                               {sp!=null&&<span className={`pct-pill ${salePillCls(sp)}`}>{pct(sp)}</span>}
                             </span>
@@ -3437,7 +3517,7 @@ export default function App() {
                       <div>
                         <div style={{fontSize:9,color:"#4ade80",letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>Cards In</div>
                         {t.cardsIn.map((ci,i)=>{
-                          const card=inventory.find(c=>c.transactionId===t.id&&(c.name||'').toLowerCase()===(ci.name||'').toLowerCase());
+                          const card = ci.cardId ? inventory.find(c=>c.id===ci.cardId) : inventory.find(c=>c.transactionId===t.id&&(c.name||'').toLowerCase()===(ci.name||'').toLowerCase());
                           const ip=toF(ci.marketAtPurchase)>0?(toF(ci.buyPrice)/toF(ci.marketAtPurchase))*100:null;
                           const owners=card?.owners||[];
                           return <div key={i} className="prev-row" style={{flexWrap:"wrap",gap:"3px 8px"}}>
@@ -3456,7 +3536,7 @@ export default function App() {
                               ))}
                             </span>
                             <span style={{display:"flex",gap:8,alignItems:"center"}}>
-                              <span style={{color:"#555"}}>mkt {fmt(toF(ci.currentMarket)||toF(ci.marketAtPurchase))}</span>
+                              <span style={{color:"#555"}}>mkt {fmt(toF(ci.marketAtPurchase))}</span>
                               {ip!=null&&<span className={`pct-pill ${pillCls(ip)}`}>in {pct(ip)}</span>}
                               {toF(ci.buyPrice)>0&&<span style={{color:"#666",fontSize:10}}>bought {fmt(toF(ci.buyPrice))}</span>}
                             </span>
@@ -3800,7 +3880,7 @@ export default function App() {
               const canAdd = missing.length === 0;
               return (
                 <>
-                  <BuyPaymentUI payment={addCardPayment} onChange={setAddCardPayment} buyPrice={toF(newCard.buyPrice)} allowBinder/>
+                  <BuyPaymentUI payment={addCardPayment} onChange={setAddCardPayment} buyPrice={toF(newCard.buyPrice)}/>
                   <OwnershipSplit profiles={profiles} owners={addCardOwners} onChange={setAddCardOwners} defaults={getDefaultOwners()}/>
                   <div style={{marginTop:14}}>
                     <ImagePicker value={addCardImage} onChange={setAddCardImage} label="Transaction Photo (optional)"/>
@@ -4182,9 +4262,9 @@ export default function App() {
               </div>
               {txCardsIn.map((ci,i)=>{
                 const ref   = toF(txInFinalPrice)>0 ? toF(txInFinalPrice) : null;
-                const base  = toF(ci.tradedAtPrice)||toF(ci.currentMarket)||toF(ci.marketAtPurchase)||0;
+                const base  = toF(ci.tradedAtPrice)||toF(ci.marketAtPurchase)||0;
                 const alloc = ref!=null ? (totalMktIn>0?(base/totalMktIn)*ref:0) : base;
-                const mkt   = toF(ci.currentMarket)||toF(ci.marketAtPurchase)||0;
+                const mkt   = toF(ci.marketAtPurchase)||0;
                 const sp    = mkt>0?(alloc/mkt)*100:0;
                 return <div key={i} className="prev-row" style={{fontSize:11}}>
                   <span style={{color:"#aaa"}}>{toTitleCase(ci.name)}{ci.grade&&<span style={{fontSize:10,color:"#a78bfa",marginLeft:6}}>{ci.grade}</span>}</span>
@@ -4274,7 +4354,7 @@ export default function App() {
                 <>
                   {/* Method toggles */}
                   <div style={{display:"flex",gap:6,marginBottom:methods.length?10:0,flexWrap:"wrap"}}>
-                    {[["cash","💵 Cash"],["venmo","💙 Venmo"],["zelle","💜 Zelle"],["binder","📖 Binder"]]
+                    {[["cash","💵 Cash"],["venmo","💙 Venmo"],["zelle","💜 Zelle"],...(txType!=="sale"?[["binder","📖 Binder"]]:[])]
                      .map(([m,label])=>{
                       const sel = methods.includes(m);
                       return (
@@ -4406,18 +4486,49 @@ export default function App() {
           <div style={{marginBottom:14}}>
             <ImagePicker value={editTx.imageUrl||""} onChange={v=>setEditTx(p=>({...p,imageUrl:v}))} label="Transaction Photo (optional)"/>
           </div>
-          {editTx.cardsOut.length>0&&(
+          {editTx.cardsOut.length>0&&(()=>{
+            const editOutMktTotal = editTx.cardsOut.reduce((s,c) => s + (toF(c.marketAtSale)||0), 0);
+            const editOutSpSum = editTx.cardsOut.reduce((s,c) => s + toF(c.salePrice), 0);
+            return (
             <div style={{marginBottom:14}}>
-              <label style={{color:"#f87171",marginBottom:8}}>Cards Out — {editTx.type==="trade"?"Traded At":"Sold At"} Prices</label>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                <label style={{color:"#f87171",margin:0}}>Cards Out — {editTx.type==="trade"?"Traded At":"Sold At"} Prices</label>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginLeft:"auto"}}>
+                  <label style={{margin:0,whiteSpace:"nowrap",fontSize:9,color:"#555"}}>Final Price ($)</label>
+                  <input className="input" type="number" min="0" step="0.01" style={{width:100,padding:"4px 8px",fontSize:11}}
+                    value={editTx._outFinalPrice??""}
+                    onChange={e=>{
+                      const fp = toF(e.target.value);
+                      if (fp > 0 && editOutMktTotal > 0) {
+                        setEditTx(p=>({...p, _outFinalPrice: e.target.value,
+                          cardsOut: p.cardsOut.map(c => {
+                            const mkt = toF(c.marketAtSale)||0;
+                            return {...c, salePrice: String(+(mkt/editOutMktTotal*fp).toFixed(2))};
+                          })}));
+                      } else {
+                        setEditTx(p=>({...p, _outFinalPrice: e.target.value}));
+                      }
+                    }}
+                    placeholder={editOutMktTotal>0?editOutMktTotal.toFixed(2):"override"}/>
+                  <span style={{fontSize:10,color:"#555"}}>sum: <span style={{color:"#e8e4d9"}}>{fmt(editOutSpSum)}</span></span>
+                </div>
+              </div>
               {editTx.cardsOut.map((co,i)=>(
                 <div key={i} style={{marginBottom:8,padding:"8px 12px",background:"#0c0c18",border:"1px solid #1e1e28",borderRadius:3}}>
-                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:co.owners?.length>0?8:0}}>
-                    <span style={{flex:1,fontSize:12,color:"#ccc"}}>{co.name}{co.grade&&<span style={{fontSize:10,color:"#a78bfa",marginLeft:6}}>{co.grade}</span>}<span style={{fontSize:10,color:"#555",marginLeft:6}}>mkt {fmt(co.currentMarket||0)}</span></span>
-                    <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <label style={{margin:0,whiteSpace:"nowrap",fontSize:9}}>{editTx.type==="trade"?"Traded at":"Sold at"} ($)</label>
-                      <input className="input" type="number" min="0" step="0.01" style={{width:100,padding:"4px 8px",fontSize:11}}
-                        value={co.salePrice??""} onChange={e=>setEditTx(p=>({...p,cardsOut:p.cardsOut.map((c,j)=>j===i?{...c,salePrice:e.target.value}:c)}))}/>
-                      {co.salePrice&&toF(co.salePrice)>0&&co.currentMarket>0&&(()=>{const sp=(toF(co.salePrice)/co.currentMarket)*100;return<span className={`pct-pill ${salePillCls(sp)}`}>{pct(sp)}</span>;})()}
+                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:co.owners?.length>0?8:0,flexWrap:"wrap"}}>
+                    <span style={{flex:1,fontSize:12,color:"#ccc",minWidth:120}}>{co.name}{co.grade&&<span style={{fontSize:10,color:"#a78bfa",marginLeft:6}}>{co.grade}</span>}</span>
+                    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:4}}>
+                        <label style={{margin:0,whiteSpace:"nowrap",fontSize:9,color:"#555"}}>Mkt@Sale ($)</label>
+                        <input className="input" type="number" min="0" step="0.01" style={{width:80,padding:"4px 8px",fontSize:11}}
+                          value={co.marketAtSale??""} onChange={e=>setEditTx(p=>({...p,cardsOut:p.cardsOut.map((c,j)=>j===i?{...c,marketAtSale:e.target.value}:c)}))}/>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:4}}>
+                        <label style={{margin:0,whiteSpace:"nowrap",fontSize:9}}>{editTx.type==="trade"?"Traded at":"Sold at"} ($)</label>
+                        <input className="input" type="number" min="0" step="0.01" style={{width:80,padding:"4px 8px",fontSize:11}}
+                          value={co.salePrice??""} onChange={e=>setEditTx(p=>({...p,cardsOut:p.cardsOut.map((c,j)=>j===i?{...c,salePrice:e.target.value}:c)}))}/>
+                      </div>
+                      {co.salePrice&&toF(co.salePrice)>0&&toF(co.marketAtSale)>0&&(()=>{const sp=(toF(co.salePrice)/toF(co.marketAtSale))*100;return<span className={`pct-pill ${salePillCls(sp)}`}>{pct(sp)}</span>;})()}
                     </div>
                   </div>
                   <OwnershipSplit profiles={profiles}
@@ -4427,24 +4538,75 @@ export default function App() {
                 </div>
               ))}
             </div>
-          )}
-          {editTx.cardsIn?.length>0&&(
+          );})()}
+          {editTx.cardsIn?.length>0&&(()=>{
+            const editInTotal = editTx.cardsIn.reduce((s,c) => s + (toF(c.marketAtPurchase)||0), 0);
+            const editInBpSum = editTx.cardsIn.reduce((s,c) => s + toF(c.buyPrice), 0);
+            return (
             <div style={{marginBottom:14}}>
-              <label style={{color:"#4ade80",marginBottom:8}}>Cards In — Ownership</label>
-              {editTx.cardsIn.map((ci,i)=>(
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                <label style={{color:"#4ade80",margin:0}}>Cards In — Cost, Market & Ownership</label>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginLeft:"auto"}}>
+                  <label style={{margin:0,whiteSpace:"nowrap",fontSize:9,color:"#555"}}>Final Price ($)</label>
+                  <input className="input" type="number" min="0" step="0.01" style={{width:100,padding:"4px 8px",fontSize:11}}
+                    value={editTx._inFinalPrice??""}
+                    onChange={e=>{
+                      const fp = toF(e.target.value);
+                      if (fp > 0 && editInTotal > 0) {
+                        setEditTx(p=>({...p, _inFinalPrice: e.target.value,
+                          cardsIn: p.cardsIn.map(c => {
+                            const base = toF(c.marketAtPurchase)||0;
+                            return {...c, buyPrice: String(+(base/editInTotal*fp).toFixed(2))};
+                          })}));
+                      } else {
+                        setEditTx(p=>({...p, _inFinalPrice: e.target.value}));
+                      }
+                    }}
+                    placeholder={editInTotal>0?editInTotal.toFixed(2):"override"}/>
+                  <span style={{fontSize:10,color:"#555"}}>sum: <span style={{color:"#e8e4d9"}}>{fmt(editInBpSum)}</span></span>
+                </div>
+              </div>
+              {editTx.cardsIn.map((ci,i)=>{
+                const mkt = toF(ci.marketAtPurchase)||0;
+                const bp = toF(ci.buyPrice);
+                const ip = mkt > 0 ? (bp/mkt)*100 : 0;
+                return (
                 <div key={i} style={{marginBottom:8,padding:"8px 12px",background:"#0a1208",border:"1px solid #14532d33",borderRadius:3}}>
-                  <div style={{fontSize:12,color:"#4ade80",marginBottom:8,fontWeight:600}}>
-                    {ci.name}{ci.grade&&<span style={{fontSize:10,color:"#a78bfa",marginLeft:6}}>{ci.grade}</span>}
-                    {!ci.cardId&&<span style={{fontSize:9,color:"#555",marginLeft:8}}>(card may have been sold/traded)</span>}
+                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"}}>
+                    <span style={{flex:1,fontSize:12,color:"#4ade80",fontWeight:600,minWidth:120}}>
+                      {ci.name}{ci.grade&&<span style={{fontSize:10,color:"#a78bfa",marginLeft:6}}>{ci.grade}</span>}
+                      {!ci.cardId&&<span style={{fontSize:9,color:"#555",marginLeft:8}}>(sold/traded)</span>}
+                    </span>
+                    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:4}}>
+                        <label style={{margin:0,whiteSpace:"nowrap",fontSize:9,color:"#555"}}>Mkt@Buy ($)</label>
+                        <input className="input" type="number" min="0" step="0.01" style={{width:80,padding:"4px 8px",fontSize:11}}
+                          value={ci.marketAtPurchase??""} onChange={e=>setEditTx(p=>({...p,cardsIn:p.cardsIn.map((c,j)=>j===i?{...c,marketAtPurchase:e.target.value}:c)}))}/>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:4}}>
+                        <label style={{margin:0,whiteSpace:"nowrap",fontSize:9,color:"#555"}}>Cost ($)</label>
+                        <input className="input" type="number" min="0" step="0.01" style={{width:80,padding:"4px 8px",fontSize:11}}
+                          value={ci.buyPrice??""} onChange={e=>setEditTx(p=>({...p,cardsIn:p.cardsIn.map((c,j)=>j===i?{...c,buyPrice:e.target.value}:c)}))}/>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:4}}>
+                        <label style={{margin:0,whiteSpace:"nowrap",fontSize:9,color:"#555"}}>%</label>
+                        <input className="input" type="number" min="0" max="200" step="0.1" style={{width:60,padding:"4px 8px",fontSize:11}}
+                          value={ip>0?ip.toFixed(1):""} onChange={e=>{
+                            const pctVal = toF(e.target.value);
+                            if (mkt > 0) setEditTx(p=>({...p,cardsIn:p.cardsIn.map((c,j)=>j===i?{...c,buyPrice:String(+((pctVal/100)*mkt).toFixed(2))}:c)}));
+                          }}/>
+                        {ip>0&&<span className={`pct-pill ${pillCls(ip)}`} style={{fontSize:9}}>{pct(ip)}</span>}
+                      </div>
+                    </div>
                   </div>
                   <OwnershipSplit profiles={profiles}
                     owners={ci.owners||[]}
                     onChange={owners=>setEditTx(p=>({...p,cardsIn:p.cardsIn.map((c,j)=>j===i?{...c,owners}:c)}))}
                     defaults={getDefaultOwners()}/>
                 </div>
-              ))}
+              );})}
             </div>
-          )}
+          );})()}
           <div className="grid2" style={{marginBottom:8}}>
             <div><label style={{color:"#4ade80"}}>Cash Received ($)</label><input className="input" type="number" min="0" step="0.01" value={editTx.cashIn} onChange={e=>setEditTx(p=>({...p,cashIn:e.target.value}))}/></div>
             <div><label style={{color:"#f87171"}}>Cash Paid Out ($)</label><input className="input" type="number" min="0" step="0.01" value={editTx.cashOut} onChange={e=>setEditTx(p=>({...p,cashOut:e.target.value}))}/></div>
@@ -4473,9 +4635,10 @@ export default function App() {
             const totalOut = co + Math.max(0,-v) + Math.max(0,-z) + Math.max(0,-b);
             const mktO = editTx.cardsOut.reduce((s,c)=>{
               const inv=inventory.find(x=>x.id===c.id);
+              if (editTx.type==='trade') return s+(inv?(inv.marketAtPurchase||inv.buyPrice):(toF(c.marketAtSale)||0));
               return s+(inv?inv.buyPrice:(c.buyPrice||0));
             },0);
-            const mktI=(editTx.cardsIn||[]).reduce((s,c)=>s+(toF(c.currentMarket)||toF(c.marketAtPurchase)||0),0);
+            const mktI=(editTx.cardsIn||[]).reduce((s,c)=>s+(toF(c.marketAtPurchase)||0),0);
             const nc=totalIn-totalOut;
             const mp=(totalIn+mktI)-(mktO+totalOut);
             return <div style={{marginBottom:14,padding:10,background:"#0a0a0f",border:"1px solid #1a1a28",borderRadius:3,display:"flex",gap:20,flexWrap:"wrap",fontSize:12}}>
@@ -4509,12 +4672,12 @@ export default function App() {
         <ModalShell title="EDIT SOLD CARD" onClose={()=>{ setEditSold(null); setEditSoldOwners([]); }}>
           <div style={{marginBottom:14}}><label>Card Name</label><input className="input" value={editSold.name} onChange={e=>setEditSold(p=>({...p,name:e.target.value}))}/></div>
           <div style={{marginBottom:14,padding:14,background:"#0c0c18",borderRadius:4,border:"1px solid #1a1a2e"}}><GradeFields data={editSold} onChange={setEditSold}/></div>
-          <div className="grid3" style={{marginBottom:14}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
             <div><label>Buy Price ($)</label><input className="input" type="number" min="0" step="0.01" value={editSold.buyPrice} onChange={e=>setEditSold(p=>({...p,buyPrice:e.target.value}))}/></div>
             <div><label>Mkt @ Purchase ($)</label><input className="input" type="number" min="0" step="0.01" value={editSold.marketAtPurchase} onChange={e=>setEditSold(p=>({...p,marketAtPurchase:e.target.value}))}/></div>
-            <div><label>Mkt @ Sale ($)</label><input className="input" type="number" min="0" step="0.01" value={editSold.currentMarket} onChange={e=>setEditSold(p=>({...p,currentMarket:e.target.value}))}/></div>
+            <div><label>Current Market ($)</label><input className="input" type="number" min="0" step="0.01" value={editSold.currentMarket} onChange={e=>setEditSold(p=>({...p,currentMarket:e.target.value}))}/></div>
+            <div><label>Sale Price ($)</label><input className="input" type="number" min="0" step="0.01" value={editSold.salePrice} onChange={e=>setEditSold(p=>({...p,salePrice:e.target.value}))}/></div>
           </div>
-          <div style={{marginBottom:14}}><label>Sale Price ($)</label><input className="input" type="number" min="0" step="0.01" value={editSold.salePrice} onChange={e=>setEditSold(p=>({...p,salePrice:e.target.value}))}/></div>
           <OwnershipSplit profiles={profiles} owners={editSoldOwners} onChange={setEditSoldOwners} defaults={getDefaultOwners()}/>
           <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
             <button className="btn btn-ghost" onClick={()=>{ setEditSold(null); setEditSoldOwners([]); }}>Cancel</button>
@@ -4549,6 +4712,16 @@ export default function App() {
           reload={reload}
           fmt={fmt} pct={pct} pillCls={pillCls} salePillCls={salePillCls}
           toTitleCase={toTitleCase} GradeTag={GradeTag}
+          onEditTx={openEditTx}
+          onEditCard={(c) => {
+            if (c.status === 'in_stock') {
+              setEditCard({...c, buyPrice:String(c.buyPrice), marketAtPurchase:String(c.marketAtPurchase), currentMarket:String(c.currentMarket)});
+              setEditCardOwners(c.owners || []);
+            } else {
+              setEditSold({...c, buyPrice:String(c.buyPrice), marketAtPurchase:String(c.marketAtPurchase), currentMarket:String(c.currentMarket), salePrice:String(c.salePrice??'')});
+              setEditSoldOwners(c.owners || []);
+            }
+          }}
         />
       )}
 

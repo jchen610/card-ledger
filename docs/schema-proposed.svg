@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 720" font-family="Consolas, monospace" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#888"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4ade80"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="720" fill="#111118" rx="8"/>
+
+  <!-- Title -->
+  <text x="500" y="32" fill="#facc15" font-size="18" font-weight="bold" text-anchor="middle">CardLedger — Proposed Schema</text>
+  <text x="500" y="52" fill="#666" font-size="11" text-anchor="middle">Green = new columns / links  |  Gray = existing</text>
+
+  <!-- ════════ cards ════════ -->
+  <rect x="360" y="75" width="280" height="260" rx="6" fill="#1a1a2e" stroke="#444" stroke-width="1.5"/>
+  <rect x="360" y="75" width="280" height="28" rx="6" fill="#2a2a4e"/>
+  <text x="500" y="94" fill="#facc15" font-size="14" font-weight="bold" text-anchor="middle">cards</text>
+
+  <text x="375" y="120" fill="#ccc">id</text><text x="570" y="120" fill="#555" text-anchor="end">PK</text>
+  <text x="375" y="140" fill="#ccc">name</text>
+  <text x="375" y="160" fill="#ccc">buy_price</text><text x="570" y="160" fill="#555" text-anchor="end">cost basis</text>
+  <text x="375" y="180" fill="#ccc">sale_price</text>
+  <text x="375" y="200" fill="#ccc">current_market</text>
+  <text x="375" y="220" fill="#ccc">status</text><text x="570" y="220" fill="#555" text-anchor="end">in_stock|sold</text>
+  <text x="375" y="240" fill="#4ade80" font-weight="bold">buy_transaction_id</text><text x="620" y="240" fill="#4ade80" text-anchor="end">NEW FK</text>
+  <text x="375" y="260" fill="#ccc">sale_transaction_id</text><text x="620" y="260" fill="#555" text-anchor="end">renamed</text>
+  <text x="375" y="280" fill="#ccc">set_name, set_number</text>
+  <text x="375" y="300" fill="#ccc">is_graded, grade ...</text>
+
+  <!-- ════════ transactions ════════ -->
+  <rect x="360" y="440" width="280" height="200" rx="6" fill="#1a1a2e" stroke="#444" stroke-width="1.5"/>
+  <rect x="360" y="440" width="280" height="28" rx="6" fill="#2a2a4e"/>
+  <text x="500" y="459" fill="#facc15" font-size="14" font-weight="bold" text-anchor="middle">transactions</text>
+
+  <text x="375" y="485" fill="#ccc">id</text><text x="570" y="485" fill="#555" text-anchor="end">PK</text>
+  <text x="375" y="505" fill="#ccc">type</text><text x="570" y="505" fill="#555" text-anchor="end">buy|sale|trade</text>
+  <text x="375" y="525" fill="#ccc">date</text>
+  <text x="375" y="545" fill="#ccc">cash_in, cash_out</text>
+  <text x="375" y="565" fill="#ccc">venmo, zelle, binder</text>
+  <text x="375" y="585" fill="#ccc">market_profit</text><text x="570" y="585" fill="#555" text-anchor="end">recalc on edit</text>
+  <text x="375" y="605" fill="#ccc">notes</text>
+
+  <!-- ════════ tx_cards_in ════════ -->
+  <rect x="30" y="200" width="250" height="200" rx="6" fill="#1a1a2e" stroke="#444" stroke-width="1.5"/>
+  <rect x="30" y="200" width="250" height="28" rx="6" fill="#2a2a4e"/>
+  <text x="155" y="219" fill="#facc15" font-size="14" font-weight="bold" text-anchor="middle">tx_cards_in</text>
+
+  <text x="45" y="248" fill="#ccc">id</text><text x="250" y="248" fill="#555" text-anchor="end">PK</text>
+  <text x="45" y="268" fill="#ccc">transaction_id</text><text x="250" y="268" fill="#555" text-anchor="end">FK→tx</text>
+  <text x="45" y="288" fill="#4ade80" font-weight="bold">card_id</text><text x="260" y="288" fill="#4ade80" text-anchor="end">NEW FK→cards</text>
+  <text x="45" y="308" fill="#ccc">name</text>
+  <text x="45" y="328" fill="#ccc">buy_price</text>
+  <text x="45" y="348" fill="#ccc">market_at_purchase</text>
+  <text x="45" y="368" fill="#ccc">current_market</text>
+
+  <!-- ════════ tx_cards_out ════════ -->
+  <rect x="720" y="200" width="250" height="180" rx="6" fill="#1a1a2e" stroke="#444" stroke-width="1.5"/>
+  <rect x="720" y="200" width="250" height="28" rx="6" fill="#2a2a4e"/>
+  <text x="845" y="219" fill="#facc15" font-size="14" font-weight="bold" text-anchor="middle">tx_cards_out</text>
+
+  <text x="735" y="248" fill="#ccc">id</text><text x="940" y="248" fill="#555" text-anchor="end">PK</text>
+  <text x="735" y="268" fill="#ccc">transaction_id</text><text x="940" y="268" fill="#555" text-anchor="end">FK→tx</text>
+  <text x="735" y="288" fill="#ccc">card_id</text><text x="940" y="288" fill="#555" text-anchor="end">FK→cards</text>
+  <text x="735" y="308" fill="#ccc">name, grade</text>
+  <text x="735" y="328" fill="#ccc">sale_price</text>
+  <text x="735" y="348" fill="#ccc">current_market</text>
+
+  <!-- ════════ card_profiles ════════ -->
+  <rect x="720" y="440" width="250" height="130" rx="6" fill="#1a1a2e" stroke="#444" stroke-width="1.5"/>
+  <rect x="720" y="440" width="250" height="28" rx="6" fill="#2a2a4e"/>
+  <text x="845" y="459" fill="#facc15" font-size="14" font-weight="bold" text-anchor="middle">card_profiles</text>
+
+  <text x="735" y="488" fill="#ccc">card_id</text><text x="940" y="488" fill="#555" text-anchor="end">FK→cards</text>
+  <text x="735" y="508" fill="#ccc">profile_id</text><text x="940" y="508" fill="#555" text-anchor="end">FK→profiles</text>
+  <text x="735" y="528" fill="#ccc">percentage</text><text x="940" y="528" fill="#555" text-anchor="end">0.0–1.0</text>
+
+  <!-- ═══ ARROWS ═══ -->
+
+  <!-- tx_cards_in.card_id → cards.id (NEW — green) -->
+  <line x1="280" y1="288" x2="358" y2="200" stroke="#4ade80" stroke-width="2" stroke-dasharray="6,3" marker-end="url(#arrow-green)"/>
+
+  <!-- tx_cards_in.transaction_id → transactions.id -->
+  <line x1="155" y1="400" x2="358" y2="485" stroke="#888" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- tx_cards_out.card_id → cards.id -->
+  <line x1="720" y1="288" x2="642" y2="200" stroke="#888" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- tx_cards_out.transaction_id → transactions.id -->
+  <line x1="845" y1="380" x2="642" y2="485" stroke="#888" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- cards.buy_transaction_id → transactions.id (NEW — green) -->
+  <line x1="430" y1="335" x2="430" y2="438" stroke="#4ade80" stroke-width="2" stroke-dasharray="6,3" marker-end="url(#arrow-green)"/>
+  <text x="435" y="390" fill="#4ade80" font-size="10">buy_tx</text>
+
+  <!-- cards.sale_transaction_id → transactions.id -->
+  <line x1="570" y1="335" x2="570" y2="438" stroke="#888" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="575" y="390" fill="#666" font-size="10">sale_tx</text>
+
+  <!-- card_profiles.card_id → cards.id -->
+  <line x1="720" y1="488" x2="642" y2="300" stroke="#888" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Legend -->
+  <rect x="30" y="640" width="300" height="60" rx="4" fill="#1a1a2e" stroke="#333"/>
+  <line x1="50" y1="665" x2="100" y2="665" stroke="#4ade80" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="110" y="669" fill="#4ade80" font-size="11">New link (Phase 1)</text>
+  <line x1="50" y1="685" x2="100" y2="685" stroke="#888" stroke-width="1.5"/>
+  <text x="110" y="689" fill="#888" font-size="11">Existing link</text>
+
+  <!-- Flow labels -->
+  <text x="155" y="190" fill="#6b8afd" font-size="12" font-weight="bold" text-anchor="middle">BUY side</text>
+  <text x="845" y="190" fill="#f87171" font-size="12" font-weight="bold" text-anchor="middle">SELL side</text>
+</svg>
