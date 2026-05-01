@@ -1,6 +1,7 @@
 // CardLedger — Express + SQLite backend
 // Run: node server/index.js
 const path = require('path');
+const os   = require('os');
 
 // Try multiple .env locations in case of different working directories
 const envPaths = [
@@ -982,6 +983,7 @@ app.get('/api/transactions', (req, res) => {
     binderAmount: t.binder_amount || null,
     binderCreditUsed: t.binder_credit_used === 1,
     imageUrl: (imgs.find(i => i.transaction_id === t.id) || {}).url || null,
+    imageUrls: imgs.filter(i => i.transaction_id === t.id).map(i => i.url),
     cardsOut: outs.filter(r => r.transaction_id === t.id).map(r => ({
       id: r.card_id, name: r.name, grade: r.grade,
       isGraded: r.is_graded === 1,
@@ -1029,9 +1031,9 @@ app.post('/api/transactions', (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(t.type, t.date, t.cashIn, t.cashOut, t.notes || null, t.marketProfit, t.paymentMethod || null, t.venmoAmount || null, t.zelleAmount || null, t.binderAmount || null).lastInsertRowid;
 
-    if (t.imageUrl) {
-      db.prepare('INSERT INTO tx_images (transaction_id, url) VALUES (?, ?)')
-        .run(txId, t.imageUrl);
+    const urls = t.imageUrls && t.imageUrls.length ? t.imageUrls : (t.imageUrl ? [t.imageUrl] : []);
+    for (const url of urls) {
+      if (url) db.prepare('INSERT INTO tx_images (transaction_id, url) VALUES (?, ?)').run(txId, url);
     }
 
     // Track binder_inventory adjustments so we can append a paper trail to
@@ -1153,9 +1155,9 @@ app.put('/api/transactions/:id', (req, res) => {
     `).run(t.date, t.notes || null, t.cashIn, t.cashOut, t.marketProfit, t.paymentMethod || null, t.venmoAmount || null, t.zelleAmount || null, t.binderAmount || null, id);
 
     db.prepare('DELETE FROM tx_images WHERE transaction_id = ?').run(id);
-    if (t.imageUrl) {
-      db.prepare('INSERT INTO tx_images (transaction_id, url) VALUES (?, ?)')
-        .run(id, t.imageUrl);
+    const urls = t.imageUrls && t.imageUrls.length ? t.imageUrls : (t.imageUrl ? [t.imageUrl] : []);
+    for (const url of urls) {
+      if (url) db.prepare('INSERT INTO tx_images (transaction_id, url) VALUES (?, ?)').run(id, url);
     }
 
     for (const co of t.cardsOut) {
@@ -1231,14 +1233,14 @@ app.post('/api/transactions/:id/undo', (req, res) => {
         // Pull set identity BEFORE flipping status (status flip doesn't touch
         // these columns, but read it here for symmetry with the sale path).
         const cardRow = db.prepare(
-          'SELECT name, set_name, set_number, buy_price FROM cards WHERE id=?'
+          'SELECT name, set_name, set_number, buy_price, is_graded FROM cards WHERE id=?'
         ).get(o.card_id);
 
         db.prepare(`
           UPDATE cards SET status='in_stock', transaction_id=NULL, sale_price=NULL WHERE id=?
         `).run(o.card_id);
 
-        if (isSaleOrTrade && cardRow) {
+        if (isSaleOrTrade && cardRow && !cardRow.is_graded) {
           const name  = (cardRow.name || '').split(' — ')[0];
           const sName = cardRow.set_name || null;
           const sNum  = cardRow.set_number || null;
@@ -1834,6 +1836,42 @@ app.get('/api/binder/snapshots/:importId', (req, res) => {
   if (!meta) return res.status(404).json({ error: 'Import not found' });
   const rows = db.prepare('SELECT * FROM binder_inventory_snapshots WHERE import_id = ? ORDER BY card_name').all(id);
   res.json({ import: meta, cards: rows });
+});
+
+// POST /api/binder/scrape-rarecandy — spawn the scraper and return CSV text
+app.post('/api/binder/scrape-rarecandy', (req, res) => {
+  const { username } = req.body;
+  if (!username || !username.trim()) return res.status(400).json({ error: 'Username is required' });
+
+  const scraperPath = path.join(__dirname, '..', '..', 'rare-candy-scraper', 'scrape-final.js');
+  const tmpCsv = path.join(os.tmpdir(), `rarecandy-${Date.now()}.csv`);
+
+  const child = require('child_process').spawn('node', [scraperPath, username.trim(), tmpCsv], {
+    timeout: 180000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let stdout = '', stderr = '';
+  child.stdout.on('data', d => { stdout += d; });
+  child.stderr.on('data', d => { stderr += d; });
+
+  child.on('close', code => {
+    if (code !== 0) {
+      console.error('RareCandy scrape failed:', stderr || stdout);
+      return res.status(500).json({ error: `Scraper exited with code ${code}`, details: (stderr || stdout).slice(-500) });
+    }
+    try {
+      const csvText = fs.readFileSync(tmpCsv, 'utf8');
+      fs.unlinkSync(tmpCsv);
+      res.json({ csvText, log: stdout.slice(-1000) });
+    } catch (e) {
+      res.status(500).json({ error: 'Scraper ran but CSV not found', details: e.message });
+    }
+  });
+
+  child.on('error', err => {
+    res.status(500).json({ error: 'Failed to spawn scraper', details: err.message });
+  });
 });
 
 // POST /api/binder/preview  — parse CSV, return diff (no DB writes)

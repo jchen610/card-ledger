@@ -23,6 +23,11 @@ const pillCls     = v => v < 75 ? "pct-good" : v < 90 ? "pct-mid" : "pct-low";
 const salePillCls = v => v >= 95 ? "pct-good" : v >= 80 ? "pct-mid" : "pct-low";
 const toF         = s => parseFloat(s) || 0;
 
+let _tz = "America/New_York";
+function todayInTz() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: _tz, year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+}
+
 const api = async (path, opts = {}) => {
   const r = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -283,6 +288,29 @@ function ImagePicker({ value, onChange, label = "Photo (optional)" }) {
   );
 }
 
+function MultiImagePicker({ values = [], onChange, label = "Photos (optional)" }) {
+  function addImage(url) { if (url) onChange([...values, url]); }
+  function removeImage(idx) { onChange(values.filter((_, i) => i !== idx)); }
+
+  return (
+    <div>
+      {values.length > 0 && (
+        <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:8}}>
+          {values.map((url, i) => (
+            <div key={i} style={{position:'relative',width:80,height:80,borderRadius:4,overflow:'hidden',border:'1px solid #252535',background:'#0a0a0f'}}>
+              <SecureImage src={url} alt={`photo ${i+1}`} style={{width:'100%',height:'100%',objectFit:'cover'}} />
+              <button type="button" onClick={() => removeImage(i)}
+                style={{position:'absolute',top:2,right:2,background:'#2a0a0acc',color:'#f87171',border:'none',borderRadius:'50%',
+                  width:18,height:18,fontSize:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <ImagePicker value="" onChange={addImage} label={values.length ? `Add another photo (${values.length} attached)` : label} />
+    </div>
+  );
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 function GradeTag({ card, small }) {
   if (!card) return null;
@@ -498,10 +526,11 @@ function BuyPaymentUI({ payment, onChange, buyPrice, allowBinder }) {
   const color    = { cash:"#4ade80", venmo:"#60a5fa", zelle:"#c084fc", binder:"#f5a623" };
   const icon     = { cash:"💵", venmo:"💙", zelle:"💜", binder:"📖" };
 
-  // Compute how much is already accounted for by filled fields
+  // Compute how much is already accounted for by filled fields (direction-aware: out = paying toward buy price)
   const filledTotal = methods.reduce((s, m) => {
     const raw = parseFloat(payment[amtKey[m]]);
-    return s + (isNaN(raw) ? 0 : raw);
+    if (isNaN(raw)) return s;
+    return s + (payment[dirKey[m]] === "out" ? raw : 0);
   }, 0);
   const emptyMethods = methods.filter(m => !payment[amtKey[m]]);
   const remaining    = Math.max(0, (buyPrice || 0) - filledTotal);
@@ -566,17 +595,22 @@ function BuyPaymentUI({ payment, onChange, buyPrice, allowBinder }) {
 
       {/* Total summary when multiple methods or mismatch */}
       {methods.length > 0 && buyPrice > 0 && (()=>{
-        const enteredTotal = methods.reduce((s,m) => {
-          const raw = parseFloat(payment[amtKey[m]]) || autoAmt;
-          return s + (payment[amtKey[m]] ? parseFloat(payment[amtKey[m]]) : (emptyMethods.includes(m) ? autoAmt : 0));
-        }, 0);
         const allFilled = emptyMethods.length === 0;
-        const total = methods.reduce((s,m)=>s+(parseFloat(payment[amtKey[m]])||0),0);
-        const diff  = total - buyPrice;
+        const totalOut = methods.reduce((s,m)=>{
+          const raw = parseFloat(payment[amtKey[m]])||0;
+          return s + (payment[dirKey[m]]==="out" ? raw : 0);
+        },0);
+        const totalIn = methods.reduce((s,m)=>{
+          const raw = parseFloat(payment[amtKey[m]])||0;
+          return s + (payment[dirKey[m]]==="in" ? raw : 0);
+        },0);
+        const net  = totalOut - totalIn;
+        const diff = net - buyPrice;
         if (!allFilled || Math.abs(diff)<0.01) return null;
         return (
           <div style={{fontSize:10,color:Math.abs(diff)<0.01?"#4ade80":"#f87171",marginTop:4,textAlign:"right"}}>
-            entered {fmt(total)} / {fmt(buyPrice)} {Math.abs(diff)>0.01&&`(${diff>0?"+":"-"}${fmt(Math.abs(diff))})`}
+            net paid {fmt(net)} / {fmt(buyPrice)} {Math.abs(diff)>0.01&&`(${diff>0?"+":"-"}${fmt(Math.abs(diff))})`}
+            {totalIn>0&&<span style={{color:"#4ade80",marginLeft:6}}>(↓{fmt(totalIn)} in)</span>}
           </div>
         );
       })()}
@@ -867,13 +901,19 @@ function TxDetailModal({ tx, inventory, onClose, onEdit, onUndo, fmt, pct, pillC
           </div>
         )}
 
-        {/* Transaction image */}
-        {tx.imageUrl && (
+        {/* Transaction images */}
+        {(tx.imageUrls?.length > 0 || tx.imageUrl) && (
           <div>
-            <div style={{fontSize:9,color:"#555",letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>Photo</div>
-            <SecureImage src={tx.imageUrl} alt="transaction"
-              style={{width:"100%",borderRadius:4,border:"1px solid #252535",cursor:"pointer"}}
-              onClick={(url)=>window.open(url,'_blank')}/>
+            <div style={{fontSize:9,color:"#555",letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>
+              {(tx.imageUrls?.length || 1) > 1 ? `Photos (${tx.imageUrls.length})` : 'Photo'}
+            </div>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              {(tx.imageUrls?.length ? tx.imageUrls : [tx.imageUrl]).map((url, i) => (
+                <SecureImage key={i} src={url} alt={`transaction ${i+1}`}
+                  style={{width:tx.imageUrls?.length>1?'calc(50% - 4px)':'100%',borderRadius:4,border:"1px solid #252535",cursor:"pointer"}}
+                  onClick={()=>window.open(url,'_blank')}/>
+              ))}
+            </div>
           </div>
         )}
 
@@ -1047,7 +1087,13 @@ function CardDetailModal({ card, transactions, inventory, onClose, reload, fmt, 
                     {zelle>0.005&&<span style={{color:"#c084fc"}}>+{fmt(zelle)} 💜</span>}
                     {zelle<-0.005&&<span style={{color:"#f87171"}}>-{fmt(Math.abs(zelle))} 💜</span>}
                   </div>
-                  {tx.imageUrl&&<SecureImage src={tx.imageUrl} alt="tx" style={{width:"100%",maxHeight:90,objectFit:"cover",borderRadius:3,marginTop:8,border:"1px solid #252535",cursor:"pointer"}} onClick={(url)=>window.open(url,'_blank')}/>}
+                  {(tx.imageUrls?.length>0||tx.imageUrl)&&(
+                    <div style={{display:'flex',gap:4,flexWrap:'wrap',marginTop:8}}>
+                      {(tx.imageUrls?.length?tx.imageUrls:[tx.imageUrl]).map((url,i)=>(
+                        <SecureImage key={i} src={url} alt="tx" style={{width:tx.imageUrls?.length>1?60:'100%',height:tx.imageUrls?.length>1?60:undefined,maxHeight:90,objectFit:"cover",borderRadius:3,border:"1px solid #252535",cursor:"pointer"}} onClick={()=>window.open(url,'_blank')}/>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -1059,7 +1105,7 @@ function CardDetailModal({ card, transactions, inventory, onClose, reload, fmt, 
 }
 
 // ─── BinderStagingPage (full-page, not a modal) ───────────────────────────────
-function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt, pct }) {
+function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt, pct, initialCsvText }) {
   const [csvText,      setCsvText]      = useState('');
   const [fileName,     setFileName]     = useState('');
   const [preview,      setPreview]      = useState(null);
@@ -1071,10 +1117,20 @@ function BinderStagingPage({ onBack, onImported, profiles, getDefaultOwners, fmt
   const [binderCredit,    setBinderCredit]    = useState('');
   const [saleProceeds,    setSaleProceeds]    = useState('');
   const [saleBinder,      setSaleBinder]      = useState('');
-  const [importDate,   setImportDate]   = useState(new Date().toISOString().split('T')[0]);
+  const [importDate,   setImportDate]   = useState(todayInTz());
   const [importNotes,  setImportNotes]  = useState('');
   const [owners,       setOwners]       = useState(() => getDefaultOwners());
   const fileRef = useRef();
+  const didAutoPreview = useRef(false);
+
+  useEffect(() => {
+    if (initialCsvText && !didAutoPreview.current) {
+      didAutoPreview.current = true;
+      setCsvText(initialCsvText);
+      setFileName('RareCandy scrape');
+      handlePreview(initialCsvText);
+    }
+  }, [initialCsvText]);
 
   async function handlePreview(text) {
     const src = text || csvText;
@@ -1542,6 +1598,8 @@ export default function App() {
       setProfiles(profs);
       setEquityDefaults(eqDef.owners || []);
       if (settings.defaultNote !== undefined) setDefaultNote(settings.defaultNote || '');
+      if (settings.timezone) setTimezone(settings.timezone);
+      if (settings.rareCandyUsername) setRareCandyUser(settings.rareCandyUsername);
       setCosts(costsData);
       setBinderCards(binderData.cards || []);
       setBinderImports(binderData.imports || []);
@@ -1565,6 +1623,42 @@ export default function App() {
   const [view,        setView]        = useState("in_stock");
   const [defaultNote, setDefaultNote] = useState("");
   const [editingDN,   setEditingDN]   = useState(false);
+  const [timezone,    setTimezoneState] = useState("America/New_York");
+  const [rareCandyUser, setRareCandyUser] = useState("apocarry");
+  const [rcScraping,    setRcScraping]    = useState(false);
+  const [rcCsvText,     setRcCsvText]     = useState(null);
+
+  function setTimezone(tz) { _tz = tz; setTimezoneState(tz); }
+
+  async function saveTimezone(tz) {
+    setTimezone(tz);
+    try { await api('/api/settings/timezone', { method:'PUT', body:{ value: tz } }); } catch(e) { console.error('Failed to save timezone', e); }
+  }
+
+  async function saveRareCandyUser(u) {
+    setRareCandyUser(u);
+    try { await api('/api/settings/rareCandyUsername', { method:'PUT', body:{ value: u } }); } catch(e) { console.error('Failed to save RC user', e); }
+  }
+
+  async function scrapeRareCandy() {
+    if (rcScraping || !rareCandyUser.trim()) return;
+    setRcScraping(true);
+    try {
+      const r = await fetch('/api/binder/scrape-rarecandy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: rareCandyUser.trim() }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Scrape failed');
+      setRcCsvText(d.csvText);
+      setView('binder_staging');
+    } catch(e) {
+      alert('RareCandy scrape failed: ' + e.message);
+    } finally {
+      setRcScraping(false);
+    }
+  }
 
   // ── Pagination state ──────────────────────────────────────────────────────────
   const [stockPage,   setStockPage]   = useState(0);
@@ -1575,7 +1669,7 @@ export default function App() {
   const [txPP,        setTxPP]        = useState(20);
 
   // ── Costs state ───────────────────────────────────────────────────────────────
-  const [costDraft,   setCostDraft]   = useState({ date: new Date().toISOString().split('T')[0], item:'', amount:'', notes:'' });
+  const [costDraft,   setCostDraft]   = useState({ date: todayInTz(), item:'', amount:'', notes:'' });
   const [editCost,    setEditCost]    = useState(null);
   const [tempDN,      setTempDN]      = useState("");
 
@@ -1676,12 +1770,12 @@ export default function App() {
 
   // Add card form
   const [newCard,       setNewCard]       = useState(BLANK_CARD);
-  const [addCardDate,   setAddCardDate]   = useState(new Date().toISOString().split("T")[0]);
+  const [addCardDate,   setAddCardDate]   = useState(todayInTz());
   const [addCardNotes,  setAddCardNotes]  = useState("");
-  const [addCardImage,  setAddCardImage]  = useState("");
+  const [addCardImages, setAddCardImages] = useState([]);
 
   // Transaction form
-  const [txDate,       setTxDate]       = useState(new Date().toISOString().split("T")[0]);
+  const [txDate,       setTxDate]       = useState(todayInTz());
   const [txNotes,      setTxNotes]      = useState("");
   const [txCashAmt,    setTxCashAmt]    = useState("");
   const [txCashDir,    setTxCashDir]    = useState("in");
@@ -1694,7 +1788,7 @@ export default function App() {
   const [txBinderDir,      setTxBinderDir]      = useState("in");
   const [txCardsOut,   setTxCardsOut]   = useState([]);
   const [txCardsIn,    setTxCardsIn]    = useState([]);
-  const [txImageUrl,   setTxImageUrl]   = useState("");
+  const [txImageUrls,  setTxImageUrls]  = useState([]);
   const [txCardSearch, setTxCardSearch] = useState("");
   const [txFinalPrice,   setTxFinalPrice]   = useState(""); // pro-rata for cards out
   const [txInFinalPrice, setTxInFinalPrice] = useState(""); // pro-rata for cards in (trade)
@@ -1704,13 +1798,13 @@ export default function App() {
   const [newTradeCardQty, setNewTradeCardQty] = useState("1");
 
   // Batch purchase
-  const [batchDate,          setBatchDate]          = useState(new Date().toISOString().split("T")[0]);
+  const [batchDate,          setBatchDate]          = useState(todayInTz());
   const [batchNotes,         setBatchNotes]         = useState("");
   const [batchCards,         setBatchCards]         = useState([]);
   const [batchDraft,         setBatchDraft]         = useState(BLANK_CARD);
   const [batchDraftQty,      setBatchDraftQty]      = useState("1");
   const [batchFinalPurchase, setBatchFinalPurchase] = useState("");
-  const [batchImage,         setBatchImage]         = useState("");
+  const [batchImages,        setBatchImages]        = useState([]);
   const [batchOwners,        setBatchOwners]        = useState([]);
   const [batchPayment,       setBatchPayment]       = useState({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out", binderAmt:"", binderDir:"out" });
 
@@ -1719,7 +1813,7 @@ export default function App() {
   const [soldSearch,      setSoldSearch]      = useState("");
   const [partnerFilters, setPartnerFilters] = useState([]); // empty=all, else array of profile ids
   const [txFilterMode,    setTxFilterMode]    = useState("day");
-  const [txDateFilter,    setTxDateFilter]    = useState(() => new Date().toISOString().split("T")[0]);
+  const [txDateFilter,    setTxDateFilter]    = useState(() => todayInTz());
   const [editingMarket,   setEditingMarket]   = useState(null);
   const [tempMarket,      setTempMarket]      = useState("");
   const [inventorySearch, setInventorySearch] = useState("");
@@ -1803,17 +1897,27 @@ export default function App() {
     const mktVal         = visibleInStockCards.reduce((s,c) => s+(c.currentMarket||0)*getPct(c), 0);
     const revenue        = relevantSold.reduce((s,c) => s+(c.salePrice||0)*getPct(c), 0);
     const costOfSold     = relevantSold.reduce((s,c) => s+c.buyPrice*getPct(c), 0);
-    const profit         = revenue - costOfSold;
+
+    const relevantTx = pf.length
+      ? transactions.filter(t =>
+          t.cardsOut?.some(co => { const inv = inventory.find(c => c.id === co.id); return inv?.owners?.some(o => pf.includes(o.profileId)); }) ||
+          inventory.some(c => c.transactionId === t.id && c.owners?.some(o => pf.includes(o.profileId)))
+        )
+      : transactions;
+    const profit = relevantTx.reduce((s,t) => s + (t.marketProfit || 0), 0);
+
     const valid          = visibleInStockCards.filter(c => c.marketAtPurchase > 0);
     const avgIntake      = valid.length ? valid.reduce((s,c) => s+(c.buyPrice/c.marketAtPurchase)*100,0)/valid.length : 0;
-    const periodFiltered = pf.length
-      ? filteredSoldCards.filter(c => c.owners?.some(o => pf.includes(o.profileId)))
-      : filteredSoldCards;
-    const periodRevenue  = periodFiltered.reduce((s,c) => s+(c.salePrice||0)*getPct(c), 0);
-    const periodCost     = periodFiltered.reduce((s,c) => s+c.buyPrice*getPct(c), 0);
-    const periodProfit   = periodRevenue - periodCost;
+
+    const periodSoldIds = new Set(filteredSoldCards.map(c => c.transactionId));
+    const periodTx = pf.length
+      ? relevantTx.filter(t => periodSoldIds.has(t.id))
+      : transactions.filter(t => periodSoldIds.has(t.id));
+    const periodProfit   = periodTx.reduce((s,t) => s + (t.marketProfit || 0), 0);
+    const periodRevenue  = (pf.length ? filteredSoldCards.filter(c => c.owners?.some(o => pf.includes(o.profileId))) : filteredSoldCards).reduce((s,c) => s+(c.salePrice||0)*getPct(c), 0);
+    const periodCost     = (pf.length ? filteredSoldCards.filter(c => c.owners?.some(o => pf.includes(o.profileId))) : filteredSoldCards).reduce((s,c) => s+c.buyPrice*getPct(c), 0);
     return { mktVal, revenue, costOfSold, profit, avgIntake, periodRevenue, periodCost, periodProfit };
-  }, [inventory, inStockCards, visibleInStockCards, soldCards, filteredSoldCards, partnerFilters, profiles]);
+  }, [inventory, inStockCards, visibleInStockCards, soldCards, filteredSoldCards, partnerFilters, profiles, transactions]);
 
   // Derived cash in/out from unified cash field
   const txCashIn  = txCashDir==="in"  ? txCashAmt : "";
@@ -1863,15 +1967,15 @@ export default function App() {
     const marketProfit = mktIn - totalOut;
 
     await api('/api/transactions', { method:'POST', body:{
-      type:'buy', date:addCardDate, notes, imageUrl:addCardImage || null,
+      type:'buy', date:addCardDate, notes, imageUrls:addCardImages,
       cashIn, cashOut, marketProfit, cardsOut:[], cardsIn:[normalized],
       paymentMethod: pm.methods.join(',') || null,
       venmoAmount: venmoSigned, zelleAmount: zelleSigned, binderAmount: binderSigned,
     }});
     setNewCard(blankCard());
-    setAddCardDate(new Date().toISOString().split("T")[0]);
+    setAddCardDate(todayInTz());
     setAddCardNotes("");
-    setAddCardImage("");
+    setAddCardImages([]);
     setAddCardOwners([]);
     setAddCardPayment({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out", binderAmt:"", binderDir:"out" });
     setShowAddCard(false);
@@ -1990,12 +2094,12 @@ export default function App() {
     const notes        = batchNotes.trim() || defaultNote;
 
     await api('/api/transactions', { method:'POST', body:{
-      type:'buy', date:batchDate, notes, imageUrl:batchImage || null,
+      type:'buy', date:batchDate, notes, imageUrls:batchImages,
       cashIn, cashOut, marketProfit, cardsOut:[], cardsIn:cardsForTx,
       paymentMethod: pm.methods.join(',') || null,
       venmoAmount: venmoSigned, zelleAmount: zelleSigned, binderAmount: binderSigned,
     }});
-    setBatchCards([]); setBatchDraft(blankCard()); setBatchFinalPurchase(""); setBatchImage(""); setBatchOwners([]);
+    setBatchCards([]); setBatchDraft(blankCard()); setBatchFinalPurchase(""); setBatchImages([]); setBatchOwners([]);
     setBatchPayment({ methods:["cash"], cashAmt:"", cashDir:"out", venmoAmt:"", venmoDir:"out", zelleAmt:"", zelleDir:"out", binderAmt:"", binderDir:"out" });
     setShowBatch(false);
     await reload();
@@ -2122,27 +2226,21 @@ export default function App() {
     const mktIn        = txCardsIn.reduce((s,c) => s+(toF(c.marketAtPurchase)||0), 0);
     const marketProfit = (totalFlowIn + mktIn) - (costBasis + totalFlowOut);
     await api('/api/transactions', { method:'POST', body:{
-      type:txType, date:txDate, notes, cashIn, cashOut, marketProfit, imageUrl:txImageUrl || null,
+      type:txType, date:txDate, notes, cashIn, cashOut, marketProfit, imageUrls:txImageUrls,
       paymentMethod: txPaymentMethods.join(',') || null,
       venmoAmount: venmoFinal || null,
       zelleAmount: zelleFinal || null,
       binderAmount: binderAmt,
       cardsOut: txCardsOut.map(c => ({...c, salePrice:getSalePrice(c), marketAtSale:c.currentMarket})),
-      cardsIn:  (()=>{
-        const inRef = toF(txInFinalPrice);
-        const bpSum = txCardsIn.reduce((s,c) => s + toF(c.buyPrice), 0);
-        const needsProrate = inRef > 0 && Math.abs(bpSum - inRef) > 0.01;
-        const totalIn = txCardsIn.reduce((s,x) => s + (toF(x.tradedAtPrice) || toF(x.marketAtPurchase) || 0), 0);
-        return txCardsIn.map(c => {
-          const base = toF(c.tradedAtPrice) || toF(c.marketAtPurchase) || 0;
-          if (needsProrate && totalIn > 0) return { ...c, buyPrice: (base / totalIn) * inRef };
-          if (toF(c.buyPrice) > 0) return c;
-          return { ...c, buyPrice: base };
-        });
-      })(),
+      cardsIn:  txCardsIn.map(c => ({
+        ...c,
+        buyPrice: txType === 'trade'
+          ? (toF(c.marketAtPurchase) || toF(c.tradedAtPrice) || toF(c.buyPrice) || 0)
+          : (toF(c.buyPrice) || toF(c.tradedAtPrice) || toF(c.marketAtPurchase) || 0),
+      })),
     }});
 
-    setTxNotes(''); setTxCashAmt(''); setTxCashDir('in'); setTxImageUrl('');
+    setTxNotes(''); setTxCashAmt(''); setTxCashDir('in'); setTxImageUrls([]);
     setTxCardsOut([]); setTxCardsIn([]); setNewTradeCard(blankCard()); setTxCardSearch('');
     setTxPaymentMethods(['cash']); setTxVenmoAmount(''); setTxZelleAmount('');
     setTxVenmoDir('in'); setTxZelleDir('in'); setTxBinderAmount(''); setTxBinderDir('in');
@@ -2152,12 +2250,12 @@ export default function App() {
     setView('transactions');
   }
 
-  // BUG FIX: reset txImageUrl and txCardSearch on every modal open
+  // BUG FIX: reset txImageUrls and txCardSearch on every modal open
   function openTxModal(type) {
     setTxType(type);
-    setTxDate(new Date().toISOString().split("T")[0]);
+    setTxDate(todayInTz());
     setTxNotes(defaultNote);
-    setTxCashAmt(''); setTxCashDir('in'); setTxImageUrl(''); setTxCardSearch('');
+    setTxCashAmt(''); setTxCashDir('in'); setTxImageUrls([]); setTxCardSearch('');
     setTxPaymentMethods(['cash']); setTxVenmoAmount(''); setTxZelleAmount('');
     setTxVenmoDir('in'); setTxZelleDir('in'); setTxFinalPrice(''); setTxInFinalPrice('');
     setTxCardsOut([]); setTxCardsIn([]);
@@ -2217,7 +2315,9 @@ export default function App() {
 
     const updatedIn = (editTx.cardsIn || []).map(c => ({
       ...c,
-      buyPrice: toF(c.buyPrice),
+      buyPrice: editTx.type === 'trade'
+        ? (toF(c.marketAtPurchase) || toF(c.buyPrice))
+        : toF(c.buyPrice),
       marketAtPurchase: toF(c.marketAtPurchase) || undefined,
     }));
 
@@ -2229,7 +2329,7 @@ export default function App() {
       marketProfit,
       cardsOut:    updatedOut,
       cardsIn:     updatedIn,
-      imageUrl:    editTx.imageUrl || null,
+      imageUrls:   editTx.imageUrls || [],
       paymentMethod: editTx.paymentMethod || null,
       venmoAmount: venmo || null,
       zelleAmount: zelle || null,
@@ -2664,8 +2764,12 @@ export default function App() {
                   <button className="btn btn-export btn-sm-wide" onClick={exportBinderCSV} disabled={sorted.length===0}>
                     ⬇ Export CSV
                   </button>
-                  <button className="btn btn-primary btn-sm-wide" onClick={() => setView('binder_staging')}>
+                  <button className="btn btn-primary btn-sm-wide" onClick={() => { setRcCsvText(null); setView('binder_staging'); }}>
                     📥 Import CSV
+                  </button>
+                  <button className="btn btn-ghost btn-sm-wide" onClick={scrapeRareCandy} disabled={rcScraping}
+                    style={{background:rcScraping?'#1a1a2e':undefined}}>
+                    {rcScraping ? '⏳ Scraping...' : '🔄 Sync RareCandy'}
                   </button>
                 </div>
               </div>
@@ -2773,16 +2877,18 @@ export default function App() {
         {/* ═══ BINDER STAGING ═══ */}
         {view === "binder_staging" && (
           <BinderStagingPage
-            onBack={() => setView('binder')}
+            onBack={() => { setView('binder'); setRcCsvText(null); }}
             onImported={async (result) => {
               await reload();
               setView('binder');
+              setRcCsvText(null);
               alert(`Import complete: +${result.added} added, -${result.removed} removed.`);
             }}
             profiles={profiles}
             getDefaultOwners={getDefaultOwners}
             fmt={fmt}
             pct={pct}
+            initialCsvText={rcCsvText}
           />
         )}
 
@@ -3448,7 +3554,7 @@ export default function App() {
                         <span style={{fontSize:10,color:"#444",fontFamily:"'Space Mono',monospace",flexShrink:0}}>#{t.id}</span>
                         {(txFilterMode==="all"||txFilterMode==="month") && <span style={{fontSize:11,color:"#555",flexShrink:0}}>{t.date}</span>}
                         {t.notes && <span style={{fontSize:11,color:"#888",background:"#1a1a10",border:"1px solid #2a2a18",borderRadius:3,padding:"1px 8px"}}>📍 {t.notes}</span>}
-                        {t.imageUrl && <span style={{fontSize:10,color:"#555"}}>📷</span>}
+                        {(t.imageUrls?.length>0||t.imageUrl) && <span style={{fontSize:10,color:"#555"}}>📷{t.imageUrls?.length>1?t.imageUrls.length:''}</span>}
                         {t.paymentMethod && t.paymentMethod.split(',').map(pm=>pm.trim()).filter(Boolean).map(pm=>{
                           const amt = pm==="venmo"   ? t.venmoAmount
                             : pm==="zelle"  ? t.zelleAmount
@@ -3481,7 +3587,7 @@ export default function App() {
                     </div>
 
                     {t.cardsOut.length>0 && (
-                      <div style={{marginBottom:t.cardsIn.length?10:0,marginTop:t.imageUrl?8:0}}>
+                      <div style={{marginBottom:t.cardsIn.length?10:0,marginTop:(t.imageUrls?.length>0||t.imageUrl)?8:0}}>
                         <div style={{fontSize:9,color:"#f87171",letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>Cards Out</div>
                         {t.cardsOut.map((co,i)=>{
                           const card=inventory.find(c=>c.id===co.id);
@@ -3701,7 +3807,7 @@ export default function App() {
         {/* ═══ COSTS ═══ */}
         {view === "costs" && (()=>{
           const totalSpend = costs.reduce((s,c)=>s+c.amount,0);
-          const BLANK_COST = { date: new Date().toISOString().split('T')[0], item:'', amount:'', notes:'' };
+          const BLANK_COST = { date: todayInTz(), item:'', amount:'', notes:'' };
 
           async function handleAddCost() {
             if (!costDraft.item.trim() || !costDraft.amount) return;
@@ -3883,7 +3989,7 @@ export default function App() {
                   <BuyPaymentUI payment={addCardPayment} onChange={setAddCardPayment} buyPrice={toF(newCard.buyPrice)}/>
                   <OwnershipSplit profiles={profiles} owners={addCardOwners} onChange={setAddCardOwners} defaults={getDefaultOwners()}/>
                   <div style={{marginTop:14}}>
-                    <ImagePicker value={addCardImage} onChange={setAddCardImage} label="Transaction Photo (optional)"/>
+                    <MultiImagePicker values={addCardImages} onChange={setAddCardImages} label="Transaction Photos (optional)"/>
                   </div>
                   {!canAdd && (
                     <div style={{marginTop:10,marginBottom:10,padding:"8px 12px",background:"#1a0a0a",border:"1px solid #7f1d1d44",borderRadius:3,fontSize:11,color:"#f87171"}}>
@@ -4005,7 +4111,7 @@ export default function App() {
                 <BuyPaymentUI payment={batchPayment} onChange={setBatchPayment} buyPrice={effectiveBuyPrice} allowBinder/>
                 <OwnershipSplit profiles={profiles} owners={batchOwners} onChange={setBatchOwners} defaults={getDefaultOwners()}/>
                 <div style={{marginTop:14}}>
-                  <ImagePicker value={batchImage} onChange={setBatchImage} label="Transaction Photo (optional)"/>
+                  <MultiImagePicker values={batchImages} onChange={setBatchImages} label="Transaction Photos (optional)"/>
                 </div>
                 <div style={{display:"flex",gap:8,justifyContent:"flex-end",alignItems:"center",marginTop:10}}>
                   {!batchCards.length && (
@@ -4278,7 +4384,7 @@ export default function App() {
           )}
 
           {/* ── TRADE BALANCE ──────────────────────────────────────── */}
-          {txType==="trade" && txCardsOut.length>0 && txCardsIn.length>0 && (()=>{
+          {txType==="trade" && txCardsOut.length>0 && (()=>{
             const myVal    = toF(txFinalPrice)>0 ? toF(txFinalPrice)
               : txCardsOut.reduce((s,c)=>s+(toF(c.tradedAtPrice)||c.currentMarket||0),0);
             const theirVal = toF(txInFinalPrice)>0 ? toF(txInFinalPrice)
@@ -4449,18 +4555,19 @@ export default function App() {
           {/* Validation messages + submit + photo */}
           {(()=>{
             const missCardsOut = txCardsOut.length === 0;
-            const missCardsIn  = txType==="trade" && txCardsIn.length === 0;
+            const hasBinder    = txPaymentMethods.includes('binder') && parseFloat(txBinderAmount) > 0;
+            const missCardsIn  = txType==="trade" && txCardsIn.length === 0 && !hasBinder;
             const canRecord    = !missCardsOut && !missCardsIn;
             return (
               <div style={{paddingTop:8}}>
                 {(missCardsOut || missCardsIn) && (
                   <div style={{marginBottom:10,padding:"8px 12px",background:"#1a0a0a",border:"1px solid #7f1d1d44",borderRadius:3,fontSize:11,color:"#f87171"}}>
                     {missCardsOut && <div>⚠ Select at least one card going out.</div>}
-                    {missCardsIn  && <div>⚠ Add at least one card coming in to record a trade.</div>}
+                    {missCardsIn  && <div>⚠ Add at least one card coming in, or enter binder credit to record a trade.</div>}
                   </div>
                 )}
                 <div style={{marginBottom:14}}>
-                  <ImagePicker value={txImageUrl} onChange={setTxImageUrl} label="Transaction Photo (optional)"/>
+                  <MultiImagePicker values={txImageUrls} onChange={setTxImageUrls} label="Transaction Photos (optional)"/>
                 </div>
                 <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
                   <button className="btn btn-ghost" onClick={()=>setShowAddTx(false)}>Cancel</button>
@@ -4484,7 +4591,7 @@ export default function App() {
             <div><label>Notes</label><input className="input" value={editTx.notes||""} onChange={e=>setEditTx(p=>({...p,notes:e.target.value}))} placeholder="e.g. TCGPlayer"/></div>
           </div>
           <div style={{marginBottom:14}}>
-            <ImagePicker value={editTx.imageUrl||""} onChange={v=>setEditTx(p=>({...p,imageUrl:v}))} label="Transaction Photo (optional)"/>
+            <MultiImagePicker values={editTx.imageUrls||[]} onChange={v=>setEditTx(p=>({...p,imageUrls:v}))} label="Transaction Photos (optional)"/>
           </div>
           {editTx.cardsOut.length>0&&(()=>{
             const editOutMktTotal = editTx.cardsOut.reduce((s,c) => s + (toF(c.marketAtSale)||0), 0);
@@ -4924,16 +5031,43 @@ export default function App() {
       {/* Floating shortcuts cog */}
       <button
         onClick={() => setShowShortcuts(true)}
-        title="Keyboard shortcuts"
+        title="Settings"
         style={{position:'fixed',bottom:16,right:16,width:38,height:38,borderRadius:'50%',
           background:'#141420',border:'1px solid #252535',color:'#f5a623',cursor:'pointer',
           fontSize:18,zIndex:90,boxShadow:'0 2px 10px rgba(0,0,0,0.5)'}}
       >⚙</button>
 
       {showShortcuts && (
-        <ModalShell title="KEYBOARD SHORTCUTS" onClose={() => { setShowShortcuts(false); setCapturingId(null); }}>
+        <ModalShell title="SETTINGS" onClose={() => { setShowShortcuts(false); setCapturingId(null); }}>
           <div style={{padding:20}}>
+            <div style={{marginBottom:20,paddingBottom:16,borderBottom:'1px solid #1e1e28'}}>
+              <div style={{fontSize:10,color:'#666',marginBottom:10,letterSpacing:1.5}}>TIMEZONE</div>
+              <div style={{display:'flex',alignItems:'center',gap:12}}>
+                <select className="input" style={{fontSize:12,padding:"6px 10px",width:"auto",background:"#16213e",color:"#e0e0e0",border:"1px solid #333",borderRadius:4}}
+                  value={timezone} onChange={e => saveTimezone(e.target.value)}>
+                  {["America/New_York","America/Chicago","America/Denver","America/Los_Angeles","America/Anchorage","Pacific/Honolulu","UTC"].map(tz => (
+                    <option key={tz} value={tz}>{tz.replace(/_/g,' ').replace('America/','')}{tz==='UTC'?'':` (${new Intl.DateTimeFormat('en-US',{timeZone:tz,timeZoneName:'short'}).format(new Date()).split(', ').pop()})`}</option>
+                  ))}
+                </select>
+                <span style={{fontSize:11,color:'#f5a623',fontFamily:"'Space Mono',monospace"}}>Today: {todayInTz()}</span>
+              </div>
+              <div style={{fontSize:10,color:'#555',marginTop:6}}>Controls the default date for new transactions</div>
+            </div>
+            <div style={{marginBottom:20,paddingBottom:16,borderBottom:'1px solid #1e1e28'}}>
+              <div style={{fontSize:10,color:'#666',marginBottom:10,letterSpacing:1.5}}>RARECANDY</div>
+              <div style={{display:'flex',alignItems:'center',gap:12}}>
+                <input className="input" style={{fontSize:12,padding:"6px 10px",width:200,background:"#16213e",color:"#e0e0e0",border:"1px solid #333",borderRadius:4}}
+                  value={rareCandyUser} onChange={e => setRareCandyUser(e.target.value)}
+                  onBlur={e => saveRareCandyUser(e.target.value)}
+                  onKeyDown={e => { if(e.key==='Enter') saveRareCandyUser(e.target.value); }}
+                  placeholder="username"/>
+                <span style={{fontSize:11,color:'#555'}}>Default username for binder sync</span>
+              </div>
+            </div>
             <div style={{fontSize:10,color:'#666',marginBottom:14,letterSpacing:1.5}}>
+              KEYBOARD SHORTCUTS
+            </div>
+            <div style={{fontSize:10,color:'#555',marginBottom:14}}>
               Click a key to rebind. Toggles disable individual shortcuts. Saved to this browser.
             </div>
             <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
