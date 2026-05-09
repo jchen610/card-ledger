@@ -490,6 +490,16 @@ function buildRichCardName(name, setName, setNumber, rarity) {
       db.pragma('user_version = 2');
     })();
   }
+  if (currentVersion < 3) {
+    console.log('[migration v3] adding binder_import_id to transactions …');
+    db.transaction(() => {
+      const cols = db.prepare("PRAGMA table_info('transactions')").all().map(c => c.name);
+      if (!cols.includes('binder_import_id')) {
+        db.exec('ALTER TABLE transactions ADD COLUMN binder_import_id INTEGER');
+      }
+      db.pragma('user_version = 3');
+    })();
+  }
 }
 
 // Profiles / equity support
@@ -1160,15 +1170,58 @@ app.put('/api/transactions/:id', (req, res) => {
       if (url) db.prepare('INSERT INTO tx_images (transaction_id, url) VALUES (?, ?)').run(id, url);
     }
 
+    // Remove cards from the transaction
+    if (t.removedCardsOut && t.removedCardsOut.length) {
+      for (const cardId of t.removedCardsOut) {
+        db.prepare('DELETE FROM tx_cards_out WHERE transaction_id=? AND card_id=?').run(id, cardId);
+        db.prepare("UPDATE cards SET status='in_stock', transaction_id=buy_transaction_id, sale_price=NULL WHERE id=?").run(cardId);
+      }
+    }
+    if (t.removedCardsIn && t.removedCardsIn.length) {
+      for (const cardId of t.removedCardsIn) {
+        db.prepare('DELETE FROM tx_cards_in WHERE transaction_id=? AND card_id=?').run(id, cardId);
+        db.prepare('DELETE FROM card_profiles WHERE card_id=?').run(cardId);
+        db.prepare('DELETE FROM cards WHERE id=?').run(cardId);
+      }
+    }
+
+    // Add new cards going out (mark existing in-stock cards as sold)
+    if (t.newCardsOut && t.newCardsOut.length) {
+      for (const nco of t.newCardsOut) {
+        const sp = nco.salePrice || 0;
+        const mas = nco.marketAtSale || nco.currentMarket || 0;
+        db.prepare("UPDATE cards SET status='sold', sale_price=?, transaction_id=? WHERE id=?").run(sp, id, nco.id);
+        db.prepare('INSERT INTO tx_cards_out (transaction_id, card_id, name, market_at_sale, sale_price) VALUES (?,?,?,?,?)')
+          .run(id, nco.id, nco.name, mas, sp);
+        if (nco.owners) saveOwnership(nco.id, nco.owners);
+      }
+    }
+
+    // Add new cards coming in (create new card rows)
+    if (t.newCardsIn && t.newCardsIn.length) {
+      for (const nci of t.newCardsIn) {
+        const bp = nci.buyPrice || 0;
+        const mkt = nci.marketAtPurchase || 0;
+        const cardId = db.prepare(
+          `INSERT INTO cards (name, set_name, set_number, condition_val, buy_price, market_at_purchase, current_market, status, transaction_id, buy_transaction_id, is_graded, grading_company, grade)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).run(nci.name, nci.setName || null, nci.setNumber || null, nci.condition || 'Near Mint',
+          bp, mkt, mkt, 'in_stock', id, id,
+          nci.isGraded ? 1 : 0, nci.gradingCompany || null, nci.grade || null
+        ).lastInsertRowid;
+        db.prepare('INSERT INTO tx_cards_in (transaction_id, card_id, name, condition_val, buy_price, market_at_purchase) VALUES (?,?,?,?,?,?)')
+          .run(id, cardId, nci.name, nci.condition || 'Near Mint', bp, mkt);
+        if (nci.owners) saveOwnership(cardId, nci.owners);
+      }
+    }
+
     for (const co of t.cardsOut) {
       db.prepare('UPDATE tx_cards_out SET sale_price=?, market_at_sale=? WHERE transaction_id=? AND card_id=?')
         .run(co.salePrice, co.marketAtSale ?? null, id, co.id);
       db.prepare('UPDATE cards SET sale_price=? WHERE id=?').run(co.salePrice, co.id);
-      // Update ownership for cards that went out (they stay in card_profiles even after sale)
       if (co.owners && co.id) saveOwnership(co.id, co.owners);
     }
 
-    // Update cards that came in via trade/buy — propagate cost basis + ownership
     const affectedTxIds = new Set([Number(id)]);
     if (t.cardsIn && t.cardsIn.length) {
       for (const ci of t.cardsIn) {
@@ -1183,13 +1236,11 @@ app.put('/api/transactions/:id', (req, res) => {
           db.prepare('UPDATE tx_cards_in SET market_at_purchase=? WHERE id=?').run(ci.marketAtPurchase, ci.tciId || 0);
         }
         if (ci.owners && ci.owners.length) saveOwnership(cardId, ci.owners);
-        // Cascade to any sale/trade TX that references this card
         const tcoRow = db.prepare('SELECT transaction_id FROM tx_cards_out WHERE card_id = ?').get(cardId);
         if (tcoRow) affectedTxIds.add(tcoRow.transaction_id);
       }
     }
 
-    // Also collect TXs affected by cardsOut edits
     for (const co of t.cardsOut) {
       if (co.id) {
         const tciRow = db.prepare('SELECT transaction_id FROM tx_cards_in WHERE card_id = ?').get(co.id);
@@ -1197,7 +1248,6 @@ app.put('/api/transactions/:id', (req, res) => {
       }
     }
 
-    // Recalculate market_profit for all affected transactions
     for (const txId of affectedTxIds) {
       recalcMarketProfit(txId);
     }
@@ -1972,9 +2022,8 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
       ...qtyDown.map(c => ({ ...c, quantity: c.delta })),
     ];
 
-    // Hoisted so the response can report which cards were marked removed/sold
-    // by the acknowledged-removal path. Populated inside the transaction below.
     const markRemovedAffectedOuter = [];
+    const importTxIds = [];
 
     db.transaction(() => {
       // ── Settle binder credit balance ─────────────────────────────────────────
@@ -2032,8 +2081,9 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
           notes || `Binder import: ${effectiveAdded.length} new card type(s)` + (binderPortion ? ` (+${binderPortion.toFixed(2)} binder credit)` : ''),
           buyMarketProfit, pmParts,
           binderPortion > 0 ? -binderPortion : null,
-          binderPortion > 0 ? 1 : 0   // born settled — the credit is consumed at creation time
+          binderPortion > 0 ? 1 : 0
         ).lastInsertRowid;
+        importTxIds.push(txId);
 
         for (const card of effectiveAdded) {
           const proportion   = totalNewValue > 0 ? (card.unit_price * card.quantity) / totalNewValue : 1 / effectiveAdded.length;
@@ -2095,6 +2145,7 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
           notes || `Binder removal: ${effectiveRemoved.length} card type(s)`, saleMarketProfit, pmMethods,
           binderProceeds > 0 ? binderProceeds : null
         ).lastInsertRowid;
+        importTxIds.push(txId);
 
         for (const card of effectiveRemoved) {
           const storedPrice    = card.storedUnitPrice || card.unit_price;
@@ -2196,6 +2247,12 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
       ).run(now, added.length, removed.length, qtyUp.length, qtyDown.length, unchanged.length,
         totalBasis > 0 ? totalBasis : null, saleProceeds || null, notes || null).lastInsertRowid;
 
+      // Link transactions to this import
+      if (importTxIds.length) {
+        const linkStmt = db.prepare('UPDATE transactions SET binder_import_id=? WHERE id=?');
+        for (const tid of importTxIds) linkStmt.run(importId, tid);
+      }
+
       // ── Per-import full snapshot of binder_inventory ────────────────────────
       // Runs AFTER all mutations above so the snapshot reflects the state the
       // user would see in-app immediately following this import.
@@ -2218,6 +2275,124 @@ app.post('/api/binder/import', express.json({ limit: '10mb' }), (req, res) => {
     });
   } catch (e) {
     console.error('[binder-import]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/binder/imports/:id — undo a binder import
+app.delete('/api/binder/imports/:id', (req, res) => {
+  try {
+    const importId = Number(req.params.id);
+    if (!importId) return res.status(400).json({ error: 'Invalid import id' });
+
+    const imp = db.prepare('SELECT * FROM binder_imports WHERE id = ?').get(importId);
+    if (!imp) return res.status(404).json({ error: 'Import not found' });
+
+    Promise.resolve().then(() => writeBackup('pre-binder-undo')).catch(e => console.warn('Pre-undo backup failed:', e.message));
+
+    const result = { deletedCards: 0, restoredCards: 0, deletedTransactions: 0 };
+
+    db.transaction(() => {
+      // Find transactions linked to this import (v3+ imports have binder_import_id set)
+      let txIds = db.prepare('SELECT id, type FROM transactions WHERE binder_import_id = ?').all(importId);
+
+      // Fallback for old imports: match by notes + date proximity
+      if (!txIds.length) {
+        const importDate = imp.imported_at ? imp.imported_at.split('T')[0] : null;
+        if (imp.notes && importDate) {
+          txIds = db.prepare(
+            `SELECT id, type FROM transactions WHERE notes = ? AND date = ? AND (type = 'buy' OR type = 'sale')`
+          ).all(imp.notes, importDate);
+        }
+      }
+
+      for (const tx of txIds) {
+        if (tx.type === 'buy') {
+          const cards = db.prepare('SELECT id FROM cards WHERE buy_transaction_id = ?').all(tx.id);
+          for (const c of cards) {
+            db.prepare('DELETE FROM card_profiles WHERE card_id = ?').run(c.id);
+          }
+          const delCards = db.prepare('DELETE FROM cards WHERE buy_transaction_id = ?').run(tx.id);
+          result.deletedCards += delCards.changes;
+          db.prepare('DELETE FROM tx_cards_in WHERE transaction_id = ?').run(tx.id);
+          db.prepare('DELETE FROM tx_images WHERE transaction_id = ?').run(tx.id);
+        } else if (tx.type === 'sale') {
+          // Restore sold cards back to in_stock
+          const soldCards = db.prepare(
+            `SELECT tco.card_id FROM tx_cards_out tco WHERE tco.transaction_id = ? AND tco.card_id IS NOT NULL`
+          ).all(tx.id);
+          for (const sc of soldCards) {
+            db.prepare('UPDATE cards SET status = ?, sale_price = NULL, transaction_id = buy_transaction_id WHERE id = ?')
+              .run('in_stock', sc.card_id);
+            result.restoredCards++;
+          }
+          db.prepare('DELETE FROM tx_cards_out WHERE transaction_id = ?').run(tx.id);
+          db.prepare('DELETE FROM tx_images WHERE transaction_id = ?').run(tx.id);
+        }
+        db.prepare('DELETE FROM transactions WHERE id = ?').run(tx.id);
+        result.deletedTransactions++;
+      }
+
+      // Restore binder_inventory from the previous import's snapshot
+      const prevImport = db.prepare(
+        'SELECT id FROM binder_imports WHERE id < ? ORDER BY id DESC LIMIT 1'
+      ).get(importId);
+
+      db.prepare('DELETE FROM binder_inventory').run();
+
+      if (prevImport) {
+        const prevSnap = db.prepare(
+          'SELECT card_name, set_name, set_number, rarity, unit_price, quantity, purchase_price FROM binder_inventory_snapshots WHERE import_id = ?'
+        ).all(prevImport.id);
+        const ins = db.prepare(
+          `INSERT INTO binder_inventory (card_name, set_name, set_number, rarity, unit_price, quantity, purchase_price, first_seen_at, last_seen_at)
+           VALUES (?,?,?,?,?,?,?,datetime('now'),datetime('now'))`
+        );
+        for (const r of prevSnap) {
+          ins.run(r.card_name, r.set_name, r.set_number, r.rarity, r.unit_price, r.quantity, r.purchase_price);
+        }
+      }
+
+      // Cross-reference restored binder against cards table: remove ghost rows
+      // for cards that were manually sold/traded between imports.
+      const restoredRows = db.prepare('SELECT id, card_name, set_name, set_number, quantity FROM binder_inventory').all();
+      result.binderGhostsFixed = 0;
+      for (const b of restoredRows) {
+        const name = (b.card_name || '').toLowerCase().trim();
+        const sName = (b.set_name || '').toLowerCase().trim();
+        const sNum = (b.set_number || '').toLowerCase().trim();
+        let inStockCount = 0;
+        if (sName && sNum) {
+          inStockCount = db.prepare(
+            `SELECT COUNT(*) as cnt FROM cards WHERE lower(set_name)=? AND lower(set_number)=? AND status='in_stock' AND is_graded=0`
+          ).get(sName, sNum).cnt;
+        } else if (sName) {
+          inStockCount = db.prepare(
+            `SELECT COUNT(*) as cnt FROM cards WHERE lower(set_name)=? AND status='in_stock' AND is_graded=0 AND lower(name) LIKE ?`
+          ).get(sName, '%' + name + '%').cnt;
+        } else {
+          inStockCount = db.prepare(
+            `SELECT COUNT(*) as cnt FROM cards WHERE status='in_stock' AND is_graded=0 AND lower(name) LIKE ?`
+          ).get('%' + name + '%').cnt;
+        }
+        if (b.quantity > inStockCount) {
+          if (inStockCount <= 0) {
+            db.prepare('DELETE FROM binder_inventory WHERE id = ?').run(b.id);
+          } else {
+            db.prepare('UPDATE binder_inventory SET quantity = ? WHERE id = ?').run(inStockCount, b.id);
+          }
+          result.binderGhostsFixed++;
+        }
+      }
+
+      // Delete this import's snapshots and the import record
+      db.prepare('DELETE FROM binder_inventory_snapshots WHERE import_id = ?').run(importId);
+      db.prepare('DELETE FROM binder_imports WHERE id = ?').run(importId);
+    })();
+
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    console.error('[binder-undo]', e);
     res.status(500).json({ error: e.message });
   }
 });

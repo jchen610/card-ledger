@@ -1810,6 +1810,7 @@ export default function App() {
 
   // Filters
   const [soldPeriod,      setSoldPeriod]      = useState(() => new Date().toISOString().slice(0,7));
+  const [dashPeriod,      setDashPeriod]      = useState("today");
   const [soldSearch,      setSoldSearch]      = useState("");
   const [partnerFilters, setPartnerFilters] = useState([]); // empty=all, else array of profile ids
   const [txFilterMode,    setTxFilterMode]    = useState("day");
@@ -1888,36 +1889,36 @@ export default function App() {
     );
   }, [inStockCards, inventorySearch, partnerFilters]);
 
+  const allInStockFiltered = useMemo(() => {
+    return partnerFilters.length
+      ? inStockCards.filter(c => c.owners?.some(o => partnerFilters.includes(o.profileId)))
+      : inStockCards;
+  }, [inStockCards, partnerFilters]);
+
   const stats = useMemo(() => {
     const pf = partnerFilters;
     const getPct = c => ownerPct(c, pf);
     const relevantSold = pf.length
       ? soldCards.filter(c => c.owners?.some(o => pf.includes(o.profileId)))
       : soldCards;
-    const mktVal         = visibleInStockCards.reduce((s,c) => s+(c.currentMarket||0)*getPct(c), 0);
+
+    const searchCards = view === 'in_stock' ? visibleInStockCards : allInStockFiltered;
+    const mktVal         = searchCards.reduce((s,c) => s+(c.currentMarket||0)*getPct(c), 0);
     const revenue        = relevantSold.reduce((s,c) => s+(c.salePrice||0)*getPct(c), 0);
     const costOfSold     = relevantSold.reduce((s,c) => s+c.buyPrice*getPct(c), 0);
 
-    const relevantTx = pf.length
-      ? transactions.filter(t =>
-          t.cardsOut?.some(co => { const inv = inventory.find(c => c.id === co.id); return inv?.owners?.some(o => pf.includes(o.profileId)); }) ||
-          inventory.some(c => c.transactionId === t.id && c.owners?.some(o => pf.includes(o.profileId)))
-        )
-      : transactions;
-    const profit = relevantTx.reduce((s,t) => s + (t.marketProfit || 0), 0);
+    const profit = revenue - costOfSold;
 
-    const valid          = visibleInStockCards.filter(c => c.marketAtPurchase > 0);
+    const valid          = searchCards.filter(c => c.marketAtPurchase > 0);
     const avgIntake      = valid.length ? valid.reduce((s,c) => s+(c.buyPrice/c.marketAtPurchase)*100,0)/valid.length : 0;
 
-    const periodSoldIds = new Set(filteredSoldCards.map(c => c.transactionId));
-    const periodTx = pf.length
-      ? relevantTx.filter(t => periodSoldIds.has(t.id))
-      : transactions.filter(t => periodSoldIds.has(t.id));
-    const periodProfit   = periodTx.reduce((s,t) => s + (t.marketProfit || 0), 0);
-    const periodRevenue  = (pf.length ? filteredSoldCards.filter(c => c.owners?.some(o => pf.includes(o.profileId))) : filteredSoldCards).reduce((s,c) => s+(c.salePrice||0)*getPct(c), 0);
-    const periodCost     = (pf.length ? filteredSoldCards.filter(c => c.owners?.some(o => pf.includes(o.profileId))) : filteredSoldCards).reduce((s,c) => s+c.buyPrice*getPct(c), 0);
-    return { mktVal, revenue, costOfSold, profit, avgIntake, periodRevenue, periodCost, periodProfit };
-  }, [inventory, inStockCards, visibleInStockCards, soldCards, filteredSoldCards, partnerFilters, profiles, transactions]);
+    const periodSoldFiltered = pf.length ? filteredSoldCards.filter(c => c.owners?.some(o => pf.includes(o.profileId))) : filteredSoldCards;
+    const periodRevenue  = periodSoldFiltered.reduce((s,c) => s+(c.salePrice||0)*getPct(c), 0);
+    const periodCost     = periodSoldFiltered.reduce((s,c) => s+c.buyPrice*getPct(c), 0);
+    const periodProfit   = periodRevenue - periodCost;
+    const stockCount     = searchCards.length;
+    return { mktVal, revenue, costOfSold, profit, avgIntake, periodRevenue, periodCost, periodProfit, stockCount };
+  }, [inventory, inStockCards, visibleInStockCards, allInStockFiltered, soldCards, filteredSoldCards, partnerFilters, profiles, transactions, view]);
 
   // Derived cash in/out from unified cash field
   const txCashIn  = txCashDir==="in"  ? txCashAmt : "";
@@ -2232,12 +2233,20 @@ export default function App() {
       zelleAmount: zelleFinal || null,
       binderAmount: binderAmt,
       cardsOut: txCardsOut.map(c => ({...c, salePrice:getSalePrice(c), marketAtSale:c.currentMarket})),
-      cardsIn:  txCardsIn.map(c => ({
-        ...c,
-        buyPrice: txType === 'trade'
-          ? (toF(c.marketAtPurchase) || toF(c.tradedAtPrice) || toF(c.buyPrice) || 0)
-          : (toF(c.buyPrice) || toF(c.tradedAtPrice) || toF(c.marketAtPurchase) || 0),
-      })),
+      cardsIn:  txCardsIn.map(c => {
+        const mkt = toF(c.marketAtPurchase) || 0;
+        if (txType === 'trade' && toF(txInFinalPrice) > 0) {
+          const totalMktRaw = txCardsIn.reduce((s,x) => s + (toF(x.marketAtPurchase) || toF(x.tradedAtPrice) || 0), 0);
+          const prorated = totalMktRaw > 0 ? (mkt / totalMktRaw) * toF(txInFinalPrice) : 0;
+          return { ...c, buyPrice: prorated };
+        }
+        return {
+          ...c,
+          buyPrice: txType === 'trade'
+            ? (toF(c.buyPrice) || toF(c.marketAtPurchase) || toF(c.tradedAtPrice) || 0)
+            : (toF(c.buyPrice) || toF(c.tradedAtPrice) || toF(c.marketAtPurchase) || 0),
+        };
+      }),
     }});
 
     setTxNotes(''); setTxCashAmt(''); setTxCashDir('in'); setTxImageUrls([]);
@@ -2282,6 +2291,12 @@ export default function App() {
         marketAtSale:  String(c.marketAtSale ?? ''),
         tradedAtPrice: String(c.salePrice ?? c.marketAtSale ?? ''),
       })),
+      newCardsOut: [],
+      newCardsIn: [],
+      removedCardsOut: [],
+      removedCardsIn: [],
+      _addOutSearch: '',
+      _addInDraft: null,
     });
   }
 
@@ -2315,9 +2330,7 @@ export default function App() {
 
     const updatedIn = (editTx.cardsIn || []).map(c => ({
       ...c,
-      buyPrice: editTx.type === 'trade'
-        ? (toF(c.marketAtPurchase) || toF(c.buyPrice))
-        : toF(c.buyPrice),
+      buyPrice: toF(c.buyPrice),
       marketAtPurchase: toF(c.marketAtPurchase) || undefined,
     }));
 
@@ -2334,6 +2347,10 @@ export default function App() {
       venmoAmount: venmo || null,
       zelleAmount: zelle || null,
       binderAmount: binder || null,
+      newCardsOut:     (editTx.newCardsOut||[]).map(c=>({id:c.id,name:c.name,salePrice:toF(c.tradedAtPrice)||c.currentMarket||0,marketAtSale:c.currentMarket||0,currentMarket:c.currentMarket||0,owners:c.owners})),
+      newCardsIn:      (editTx.newCardsIn||[]).map(c=>({name:c.name,buyPrice:toF(c.buyPrice)||0,marketAtPurchase:toF(c.marketAtPurchase)||0,setName:c.setName,setNumber:c.setNumber,condition:c.condition,isGraded:c.isGraded,gradingCompany:c.gradingCompany,grade:c.grade,owners:c.owners})),
+      removedCardsOut: editTx.removedCardsOut||[],
+      removedCardsIn:  editTx.removedCardsIn||[],
     }});
     setEditTx(null);
     await reload();
@@ -2603,9 +2620,9 @@ export default function App() {
         {/* STATS BAR */}
         <div className="grid4" style={{marginBottom:22}}>
           {[
-            {label: activeProfiles.length===1 ? `${activeProfiles[0].name}'s Stock` : "In Stock",       val: activeProfiles.length ? `${visibleInStockCards.length} cards` : inStockCards.length+" cards", color:"#4ade80"},
+            {label: activeProfiles.length===1 ? `${activeProfiles[0].name}'s Stock` : "In Stock",       val: stats.stockCount+" cards", color:"#4ade80"},
             {label: activeProfiles.length===1 ? `${activeProfiles[0].name}'s Equity` : "Market Value",   val:fmt(stats.mktVal),            color: activeProfiles.length===1 ? activeProfiles[0].color : "#f5a623"},
-            {label:`${activeProfiles.length===1 ? activeProfiles[0].name+"'s " : ""}Realized Profit (${soldPeriod})`, val:(stats.periodProfit>=0?"+":"-")+fmt(stats.periodProfit), color:stats.periodProfit>=0?"#4ade80":"#f87171"},
+            {label:`${activeProfiles.length===1 ? activeProfiles[0].name+"'s " : ""}Realized P&L`, val:(stats.profit>=0?"+":"-")+fmt(Math.abs(stats.profit)), color:stats.profit>=0?"#4ade80":"#f87171"},
             {label:"Avg Intake %",   val:pct(stats.avgIntake),         color:stats.avgIntake<75?"#4ade80":stats.avgIntake<90?"#fbbf24":"#f87171"},
           ].map(s => (
             <div key={s.label} className="stat-card">
@@ -2620,25 +2637,48 @@ export default function App() {
           const mono = { fontFamily:"'Space Mono',monospace" };
           const today = new Date().toISOString().slice(0,10);
           const monthStart = today.slice(0,7);
-          const todayTx = transactions.filter(t => t.date === today);
-          const monthTx = transactions.filter(t => (t.date||'').startsWith(monthStart));
+          const weekStart = (() => { const d = new Date(); d.setDate(d.getDate() - d.getDay()); return d.toISOString().slice(0,10); })();
+
+          const periodFilter = (tx) => {
+            if (dashPeriod === "today") return tx.filter(t => t.date === today);
+            if (dashPeriod === "week") return tx.filter(t => (t.date||'') >= weekStart);
+            if (dashPeriod === "month") return tx.filter(t => (t.date||'').startsWith(monthStart));
+            return tx;
+          };
+          const periodLabel = dashPeriod === "today" ? `TODAY · ${today}`
+            : dashPeriod === "week" ? `THIS WEEK · ${weekStart}`
+            : dashPeriod === "month" ? `THIS MONTH · ${monthStart}`
+            : "ALL TIME";
+
+          const periodTx = periodFilter(transactions);
           const flowOf = (arr) => arr.reduce((s,t)=>{
             const v=t.venmoAmount||0, z=t.zelleAmount||0, b=t.binderAmount||0;
             const inn=t.cashIn+Math.max(0,v)+Math.max(0,z)+Math.max(0,b);
             const out=t.cashOut+Math.max(0,-v)+Math.max(0,-z)+Math.max(0,-b);
             return s + (inn-out);
           },0);
-          const profitOf = (arr) => arr.reduce((s,t)=>s+(t.marketProfit||0),0);
-          const todayNet  = flowOf(todayTx);
-          const monthNet  = flowOf(monthTx);
-          const todayProf = profitOf(todayTx);
-          const monthProf = profitOf(monthTx);
+          const profitOf = (arr) => {
+            const txIds = new Set(arr.map(t => t.id));
+            const pf = partnerFilters;
+            const getPct = c => ownerPct(c, pf);
+            return soldCards.filter(c => txIds.has(c.transactionId)).reduce((s,c) => s + ((c.salePrice||0) - c.buyPrice) * getPct(c), 0);
+          };
+          const periodNet   = flowOf(periodTx);
+          const periodProf  = profitOf(periodTx);
+
+          const pf = partnerFilters;
+          const getPct = c => ownerPct(c, pf);
+          const stockCards = pf.length ? inStockCards.filter(c => c.owners?.some(o => pf.includes(o.profileId))) : inStockCards;
+          const stockMkt  = stockCards.reduce((s,c) => s + (c.currentMarket||0)*getPct(c), 0);
+          const stockCost = stockCards.reduce((s,c) => s + c.buyPrice*getPct(c), 0);
+          const unrealized = stockMkt - stockCost;
+
           const binderMkt = binderCards.reduce((s,c)=>s+c.unit_price*c.quantity,0);
           const binderCost = binderCards.reduce((s,c)=>s+(c.purchase_price||0)*c.quantity,0);
           const binderGain = binderMkt - binderCost;
           const recent = [...transactions].sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,5);
-          const Card = ({label,val,color,sub}) => (
-            <div className="stat-card">
+          const Card = ({label,val,color,sub,border}) => (
+            <div className="stat-card" style={border ? {borderLeft:`3px solid ${border}`,paddingLeft:11} : {}}>
               <div className="stat-label">{label}</div>
               <div style={{fontSize:18,fontWeight:700,color:color||'#e8e4d9',...mono}}>{val}</div>
               {sub && <div style={{fontSize:9,color:'#555',marginTop:3}}>{sub}</div>}
@@ -2648,33 +2688,33 @@ export default function App() {
             <div>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
                 <h2 className="section-title">DASHBOARD</h2>
-                <div style={{display:'flex',gap:8}}>
+                <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                  <select className="select" style={{width:'auto',fontSize:11}} value={dashPeriod} onChange={e=>setDashPeriod(e.target.value)}>
+                    <option value="today">Today</option>
+                    <option value="week">This Week</option>
+                    <option value="month">This Month</option>
+                    <option value="all">All Time</option>
+                  </select>
                   <button className="btn btn-primary btn-sm" onClick={()=>{setAddCardOwners(getDefaultOwners());setShowAddCard(true);}}>+ Card</button>
-                  <button className="btn btn-ghost btn-sm" onClick={()=>{setBatchOwners(getDefaultOwners());setShowBatch(true);}}>📦 Batch</button>
-                  <button className="btn btn-ghost btn-sm" onClick={()=>openTxModal('sale')}>💰 Sale</button>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>{setBatchOwners(getDefaultOwners());setShowBatch(true);}}>Batch</button>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>openTxModal('sale')}>Sale</button>
                 </div>
               </div>
 
-              <div style={{fontSize:10,letterSpacing:2,color:'#666',marginBottom:6}}>TODAY · {today}</div>
+              <div style={{fontSize:10,letterSpacing:2,color:'#666',marginBottom:6}}>{periodLabel}</div>
               <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:18}}>
-                <Card label="Net Cashflow" val={(todayNet>=0?'+':'-')+fmt(Math.abs(todayNet))} color={todayNet>=0?'#4ade80':'#f87171'}/>
-                <Card label="Realized P/L" val={(todayProf>=0?'+':'-')+fmt(Math.abs(todayProf))} color={todayProf>=0?'#4ade80':'#f87171'}/>
-                <Card label="Transactions" val={todayTx.length}/>
-              </div>
-
-              <div style={{fontSize:10,letterSpacing:2,color:'#666',marginBottom:6}}>THIS MONTH · {monthStart}</div>
-              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:18}}>
-                <Card label="Net Cashflow" val={(monthNet>=0?'+':'-')+fmt(Math.abs(monthNet))} color={monthNet>=0?'#4ade80':'#f87171'}/>
-                <Card label="Realized P/L" val={(monthProf>=0?'+':'-')+fmt(Math.abs(monthProf))} color={monthProf>=0?'#4ade80':'#f87171'}/>
-                <Card label="Transactions" val={monthTx.length}/>
+                <Card label="Net Cashflow" val={(periodNet>=0?'+':'-')+fmt(Math.abs(periodNet))} color={periodNet>=0?'#4ade80':'#f87171'}/>
+                <Card label="Realized P&L" val={(periodProf>=0?'+':'-')+fmt(Math.abs(periodProf))} color={periodProf>=0?'#4ade80':'#f87171'} border="#4ade80" sub="sale price − buy price"/>
+                <Card label="Unrealized P&L" val={(unrealized>=0?'+':'-')+fmt(Math.abs(unrealized))} color={unrealized>=0?'#a78bfa':'#f87171'} border="#a78bfa" sub="current market − cost basis"/>
+                <Card label="Transactions" val={periodTx.length}/>
               </div>
 
               <div style={{fontSize:10,letterSpacing:2,color:'#666',marginBottom:6}}>HOLDINGS</div>
               <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:18}}>
-                <Card label="In Stock" val={inStockCards.length+' cards'} sub={fmt(stats.mktVal)+' mkt'}/>
+                <Card label="In Stock" val={stockCards.length+' cards'} sub={fmt(stockMkt)+' mkt'}/>
+                <Card label="Stock Cost" val={fmt(stockCost)} sub="total cost basis"/>
                 <Card label="Binder Mkt" val={fmt(binderMkt)} sub={binderCards.length+' uniques'}/>
-                <Card label="Binder Cost" val={binderCost>0?fmt(binderCost):'—'}/>
-                <Card label="Binder P/L" val={binderCost>0?((binderGain>=0?'+':'-')+fmt(Math.abs(binderGain))):'—'} color={binderCost>0?(binderGain>=0?'#4ade80':'#f87171'):'#666'}/>
+                <Card label="Binder P/L (Unrealized)" val={binderCost>0?((binderGain>=0?'+':'-')+fmt(Math.abs(binderGain))):'—'} color={binderCost>0?(binderGain>=0?'#4ade80':'#f87171'):'#666'}/>
               </div>
 
               <div style={{fontSize:10,letterSpacing:2,color:'#666',marginBottom:6}}>RECENT TRANSACTIONS</div>
@@ -2851,7 +2891,7 @@ export default function App() {
                         <th>Date</th>
                         <th style={{color:'#4ade80'}}>+Added</th>
                         <th style={{color:'#f87171'}}>-Removed</th>
-                        <th>Unchanged</th><th>Cost Basis</th><th>Sale Proceeds</th><th>Notes</th>
+                        <th>Unchanged</th><th>Cost Basis</th><th>Sale Proceeds</th><th>Notes</th><th></th>
                       </tr></thead>
                       <tbody>
                         {binderImports.map(imp => (
@@ -2863,6 +2903,16 @@ export default function App() {
                             <td style={{textAlign:'right',color:'#f5a623',fontSize:12,...mono}}>{imp.cost_basis!=null?fmt(imp.cost_basis):'—'}</td>
                             <td style={{textAlign:'right',color:'#f5a623',fontSize:12,...mono}}>{imp.sale_proceeds!=null?fmt(imp.sale_proceeds):'—'}</td>
                             <td style={{fontSize:11,color:'#666',maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{imp.notes||'—'}</td>
+                            <td><button style={{fontSize:10,padding:'2px 8px',background:'#dc2626',color:'#fff',border:'none',borderRadius:4,cursor:'pointer'}} onClick={async()=>{
+                              if(!window.confirm(`Undo import "${imp.notes||'#'+imp.id}" from ${new Date(imp.imported_at).toLocaleDateString()}?\n\nThis will delete all transactions and cards created by this import and restore binder inventory to the previous state.`)) return;
+                              try{
+                                const r=await fetch(`/api/binder/imports/${imp.id}`,{method:'DELETE'});
+                                const d=await r.json();
+                                if(!r.ok) throw new Error(d.error||'Undo failed');
+                                alert(`Undo complete: ${d.deletedCards} cards deleted, ${d.restoredCards} cards restored, ${d.deletedTransactions} transactions removed.`);
+                                await reload();
+                              }catch(e){alert('Undo failed: '+e.message);}
+                            }}>Undo</button></td>
                           </tr>
                         ))}
                       </tbody>
@@ -2882,7 +2932,14 @@ export default function App() {
               await reload();
               setView('binder');
               setRcCsvText(null);
-              alert(`Import complete: +${result.added} added, -${result.removed} removed.`);
+              let syncMsg = '';
+              try {
+                const syncResult = await api('/api/cards/bulk-sync-prices', { method:'POST' });
+                await reload();
+                const b = syncResult.breakdown || {};
+                syncMsg = `\n\nAuto-synced prices: ${syncResult.updated} updated (${b.exact||0} exact, ${b.bySet||0} by set, ${b.byNameOnly||0} by name), ${b.ambiguousSkipped||0} skipped, ${b.slabsSkipped||0} slabs skipped.`;
+              } catch(e) { syncMsg = `\n\nAuto-sync failed: ${e.message}`; }
+              alert(`Import complete: +${result.added} added, -${result.removed} removed.${syncMsg}`);
             }}
             profiles={profiles}
             getDefaultOwners={getDefaultOwners}
@@ -2906,11 +2963,6 @@ export default function App() {
                   <button className="btn btn-ghost btn-sm-wide" onClick={() => { setBatchOwners(getDefaultOwners()); setShowBatch(true); }}>📦 Batch Buy</button>
                   <button className="btn btn-ghost btn-sm-wide" onClick={() => openTxModal("sale")}>💰 Sale</button>
                   <button className="btn btn-ghost btn-sm-wide" onClick={() => openTxModal("trade")}>⇄ Trade</button>
-                  {binderCards.length > 0 && (
-                    <button className="btn btn-ghost btn-sm-wide" onClick={bulkRefreshFromBinder} disabled={bulkRefreshing} title="Update Current Market from binder unit prices (matches by card name)">
-                      {bulkRefreshing ? '⏳ Refreshing…' : '↻ Sync Prices'}
-                    </button>
-                  )}
                 </div>
               </div>
             </div>
@@ -3108,7 +3160,7 @@ export default function App() {
                     {label:"Cards Sold",     val:searchedSoldCards.length,  color:"#e8e4d9"},
                     {label:"Revenue",        val:fmt(periodRevenue),         color:"#4ade80"},
                     {label:"Cost Basis",     val:fmt(periodCost),            color:"#f87171"},
-                    {label:"Realized Profit",val:(periodProfit>=0?"+":"-")+fmt(periodProfit), color:periodProfit>=0?"#4ade80":"#f87171"},
+                    {label:"Realized P&L",val:(periodProfit>=0?"+":"-")+fmt(periodProfit), color:periodProfit>=0?"#4ade80":"#f87171"},
                   ].map(s=>(
                     <div key={s.label} style={{background:"#0e0e18",border:"1px solid #1e1e28",borderRadius:4,padding:"10px 14px"}}>
                       <div style={{fontSize:9,letterSpacing:2,color:"#555",textTransform:"uppercase",marginBottom:5}}>{s.label}</div>
@@ -3714,7 +3766,7 @@ export default function App() {
               {[
                 {label: activeProfiles.length===1 ? `${activeProfiles[0].name}'s Revenue`   : "Revenue",        val:fmt(stats.revenue),     color:"#4ade80"},
                 {label: activeProfiles.length===1 ? `${activeProfiles[0].name}'s Cost`      : "Cost of Sold",   val:fmt(stats.costOfSold),  color:"#f87171"},
-                {label: activeProfiles.length===1 ? `${activeProfiles[0].name}'s Profit`    : "Realized Profit",val:(stats.profit>=0?"+":"-")+fmt(stats.profit), color:stats.profit>=0?"#4ade80":"#f87171"},
+                {label: activeProfiles.length===1 ? `${activeProfiles[0].name}'s Profit`    : "Realized P&L",val:(stats.profit>=0?"+":"-")+fmt(stats.profit), color:stats.profit>=0?"#4ade80":"#f87171"},
                 {label:"Unrealized Gain", val:(()=>{const t=visibleInStockCards.reduce((s,c)=>s+(c.currentMarket||0)*ownerPct(c,partnerFilters),0),p=visibleInStockCards.reduce((s,c)=>s+(c.marketAtPurchase||0)*ownerPct(c,partnerFilters),0),d=t-p;return(d>=0?"+":"-")+fmt(Math.abs(d));})(),
                   color:(()=>{const d=visibleInStockCards.reduce((s,c)=>s+(c.currentMarket||0)*ownerPct(c,partnerFilters),0)-visibleInStockCards.reduce((s,c)=>s+(c.marketAtPurchase||0)*ownerPct(c,partnerFilters),0);return d>=0?"#4ade80":"#f87171";})()},
               ].map(s=><div key={s.label} className="stat-card"><div className="stat-label">{s.label}</div><div className="stat-value" style={{color:s.color}}>{s.val}</div></div>)}
@@ -3787,7 +3839,7 @@ export default function App() {
                             {l:"Unrealized Gain",    v:(p.unrealized>=0?"+":"-")+fmt(p.unrealized),    c:p.unrealized>=0?"#4ade80":"#f87171"},
                             {l:"Revenue (Sales)",    v:fmt(p.revenue),                                 c:"#4ade80"},
                             {l:"Cost of Sold",       v:fmt(p.costSold||0),                             c:"#f87171"},
-                            {l:"Realized Profit",    v:(p.profit>=0?"+":"-")+fmt(p.profit),            c:p.profit>=0?"#4ade80":"#f87171"},
+                            {l:"Realized P&L",       v:(p.profit>=0?"+":"-")+fmt(p.profit),            c:p.profit>=0?"#4ade80":"#f87171"},
                           ].map(s => (
                             <div key={s.l} style={{background:"#0a0a12",border:"1px solid #1a1a28",borderRadius:4,padding:"8px 10px"}}>
                               <div style={{fontSize:8,letterSpacing:1.5,color:"#555",textTransform:"uppercase",marginBottom:4}}>{s.l}</div>
@@ -4593,7 +4645,7 @@ export default function App() {
           <div style={{marginBottom:14}}>
             <MultiImagePicker values={editTx.imageUrls||[]} onChange={v=>setEditTx(p=>({...p,imageUrls:v}))} label="Transaction Photos (optional)"/>
           </div>
-          {editTx.cardsOut.length>0&&(()=>{
+          {(editTx.cardsOut.length>0||editTx.newCardsOut?.length>0||editTx.type==='sale'||editTx.type==='trade')&&(()=>{
             const editOutMktTotal = editTx.cardsOut.reduce((s,c) => s + (toF(c.marketAtSale)||0), 0);
             const editOutSpSum = editTx.cardsOut.reduce((s,c) => s + toF(c.salePrice), 0);
             return (
@@ -4621,8 +4673,10 @@ export default function App() {
                 </div>
               </div>
               {editTx.cardsOut.map((co,i)=>(
-                <div key={i} style={{marginBottom:8,padding:"8px 12px",background:"#0c0c18",border:"1px solid #1e1e28",borderRadius:3}}>
+                <div key={co.id||i} style={{marginBottom:8,padding:"8px 12px",background:"#0c0c18",border:"1px solid #1e1e28",borderRadius:3}}>
                   <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:co.owners?.length>0?8:0,flexWrap:"wrap"}}>
+                    <button style={{background:'none',border:'none',color:'#f87171',cursor:'pointer',fontSize:14,padding:0,lineHeight:1}} title="Remove from transaction"
+                      onClick={()=>setEditTx(p=>({...p,cardsOut:p.cardsOut.filter((_,j)=>j!==i),removedCardsOut:[...(p.removedCardsOut||[]),co.id]}))}>×</button>
                     <span style={{flex:1,fontSize:12,color:"#ccc",minWidth:120}}>{co.name}{co.grade&&<span style={{fontSize:10,color:"#a78bfa",marginLeft:6}}>{co.grade}</span>}</span>
                     <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
                       <div style={{display:"flex",alignItems:"center",gap:4}}>
@@ -4644,16 +4698,44 @@ export default function App() {
                     defaults={getDefaultOwners()}/>
                 </div>
               ))}
+              {(editTx.newCardsOut||[]).map((nco,i)=>(
+                <div key={'new-out-'+i} style={{marginBottom:8,padding:"8px 12px",background:"#0c0c18",border:"1px solid #2d6a4f",borderRadius:3}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <button style={{background:'none',border:'none',color:'#f87171',cursor:'pointer',fontSize:14,padding:0,lineHeight:1}}
+                      onClick={()=>setEditTx(p=>({...p,newCardsOut:p.newCardsOut.filter((_,j)=>j!==i)}))}>×</button>
+                    <span style={{flex:1,fontSize:12,color:"#4ade80",minWidth:120}}>{nco.name}</span>
+                    <span style={{fontSize:10,color:"#555"}}>{fmt(nco.currentMarket||0)}</span>
+                    <span style={{fontSize:9,color:"#4ade80"}}>NEW</span>
+                  </div>
+                </div>
+              ))}
+              <div style={{marginTop:4,position:'relative'}}>
+                <input className="input" style={{fontSize:11,padding:'4px 8px'}} placeholder="+ Add card from inventory…"
+                  value={editTx._addOutSearch||''} onChange={e=>setEditTx(p=>({...p,_addOutSearch:e.target.value}))}/>
+                {editTx._addOutSearch&&editTx._addOutSearch.length>1&&(()=>{
+                  const q=editTx._addOutSearch.toLowerCase();
+                  const alreadyIds=new Set([...editTx.cardsOut.map(c=>c.id),...(editTx.newCardsOut||[]).map(c=>c.id)]);
+                  const matches=inventory.filter(c=>c.status==='in_stock'&&!alreadyIds.has(c.id)&&c.name.toLowerCase().includes(q)).slice(0,8);
+                  return matches.length>0&&<div style={{position:'absolute',zIndex:99,background:'#111',border:'1px solid #333',borderRadius:4,maxHeight:200,overflowY:'auto',width:'100%',top:'100%'}}>
+                    {matches.map(c=><div key={c.id} style={{padding:'6px 10px',fontSize:11,color:'#ccc',cursor:'pointer',borderBottom:'1px solid #1a1a28',display:'flex',justifyContent:'space-between'}}
+                      onClick={()=>setEditTx(p=>({...p,_addOutSearch:'',newCardsOut:[...(p.newCardsOut||[]),{id:c.id,name:c.name,currentMarket:c.currentMarket,tradedAtPrice:String(c.currentMarket||''),owners:getDefaultOwners()}]}))}>
+                      <span>{c.name}{c.grade&&<span style={{color:'#a78bfa',marginLeft:4}}>{c.grade}</span>}</span>
+                      <span style={{color:'#f5a623'}}>{fmt(c.currentMarket||0)}</span>
+                    </div>)}
+                  </div>;
+                })()}
+              </div>
             </div>
           );})()}
-          {editTx.cardsIn?.length>0&&(()=>{
-            const editInTotal = editTx.cardsIn.reduce((s,c) => s + (toF(c.marketAtPurchase)||0), 0);
-            const editInBpSum = editTx.cardsIn.reduce((s,c) => s + toF(c.buyPrice), 0);
+          {(editTx.cardsIn?.length>0||editTx.newCardsIn?.length>0||editTx.type==='trade')&&(()=>{
+            const allIn = [...(editTx.cardsIn||[])];
+            const editInTotal = allIn.reduce((s,c) => s + (toF(c.marketAtPurchase)||0), 0);
+            const editInBpSum = allIn.reduce((s,c) => s + toF(c.buyPrice), 0);
             return (
             <div style={{marginBottom:14}}>
               <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
                 <label style={{color:"#4ade80",margin:0}}>Cards In — Cost, Market & Ownership</label>
-                <div style={{display:"flex",alignItems:"center",gap:6,marginLeft:"auto"}}>
+                {allIn.length>0&&<div style={{display:"flex",alignItems:"center",gap:6,marginLeft:"auto"}}>
                   <label style={{margin:0,whiteSpace:"nowrap",fontSize:9,color:"#555"}}>Final Price ($)</label>
                   <input className="input" type="number" min="0" step="0.01" style={{width:100,padding:"4px 8px",fontSize:11}}
                     value={editTx._inFinalPrice??""}
@@ -4671,15 +4753,17 @@ export default function App() {
                     }}
                     placeholder={editInTotal>0?editInTotal.toFixed(2):"override"}/>
                   <span style={{fontSize:10,color:"#555"}}>sum: <span style={{color:"#e8e4d9"}}>{fmt(editInBpSum)}</span></span>
-                </div>
+                </div>}
               </div>
               {editTx.cardsIn.map((ci,i)=>{
                 const mkt = toF(ci.marketAtPurchase)||0;
                 const bp = toF(ci.buyPrice);
                 const ip = mkt > 0 ? (bp/mkt)*100 : 0;
                 return (
-                <div key={i} style={{marginBottom:8,padding:"8px 12px",background:"#0a1208",border:"1px solid #14532d33",borderRadius:3}}>
+                <div key={ci.cardId||i} style={{marginBottom:8,padding:"8px 12px",background:"#0a1208",border:"1px solid #14532d33",borderRadius:3}}>
                   <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"}}>
+                    <button style={{background:'none',border:'none',color:'#f87171',cursor:'pointer',fontSize:14,padding:0,lineHeight:1}} title="Remove from transaction"
+                      onClick={()=>{if(!window.confirm(`Remove "${ci.name}" from this transaction? The card will be deleted.`))return;setEditTx(p=>({...p,cardsIn:p.cardsIn.filter((_,j)=>j!==i),removedCardsIn:[...(p.removedCardsIn||[]),ci.cardId||ci._cardId]}));}}>×</button>
                     <span style={{flex:1,fontSize:12,color:"#4ade80",fontWeight:600,minWidth:120}}>
                       {ci.name}{ci.grade&&<span style={{fontSize:10,color:"#a78bfa",marginLeft:6}}>{ci.grade}</span>}
                       {!ci.cardId&&<span style={{fontSize:9,color:"#555",marginLeft:8}}>(sold/traded)</span>}
@@ -4712,6 +4796,48 @@ export default function App() {
                     defaults={getDefaultOwners()}/>
                 </div>
               );})}
+              {(editTx.newCardsIn||[]).map((nci,i)=>(
+                <div key={'new-in-'+i} style={{marginBottom:8,padding:"8px 12px",background:"#0a1208",border:"1px solid #2d6a4f",borderRadius:3}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <button style={{background:'none',border:'none',color:'#f87171',cursor:'pointer',fontSize:14,padding:0,lineHeight:1}}
+                      onClick={()=>setEditTx(p=>({...p,newCardsIn:p.newCardsIn.filter((_,j)=>j!==i)}))}>×</button>
+                    <span style={{flex:1,fontSize:12,color:"#4ade80"}}>{nci.name}</span>
+                    <span style={{fontSize:10,color:"#555"}}>{fmt(nci.marketAtPurchase||0)}</span>
+                    <span style={{fontSize:9,color:"#4ade80"}}>NEW</span>
+                  </div>
+                </div>
+              ))}
+              {editTx.type==='trade'&&(()=>{
+                const d=editTx._addInDraft;
+                if(!d) return <button style={{marginTop:4,background:'none',border:'1px dashed #14532d',color:'#4ade80',fontSize:11,padding:'4px 10px',borderRadius:4,cursor:'pointer',width:'100%'}}
+                  onClick={()=>setEditTx(p=>({...p,_addInDraft:{name:'',buyPrice:'',marketAtPurchase:'',owners:getDefaultOwners()}}))}>+ Add card received</button>;
+                const mkt=toF(d.marketAtPurchase)||0;
+                const bp=toF(d.buyPrice)||0;
+                const pctMkt=mkt>0?(bp/mkt)*100:0;
+                return <div style={{marginTop:4,padding:'10px 12px',background:'#0a1208',border:'1px solid #14532d',borderRadius:4}}>
+                  <div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap',marginBottom:8}}>
+                    <div style={{flex:1,minWidth:150}}><label style={{fontSize:9,color:'#555'}}>Card Name</label><input className="input" style={{fontSize:11,padding:'4px 8px'}} value={d.name} onChange={e=>setEditTx(p=>({...p,_addInDraft:{...p._addInDraft,name:e.target.value}}))}/></div>
+                    <div style={{width:90}}><label style={{fontSize:9,color:'#555'}}>Market ($)</label><input className="input" type="number" min="0" step="0.01" style={{fontSize:11,padding:'4px 8px'}} value={d.marketAtPurchase||''} onChange={e=>setEditTx(p=>({...p,_addInDraft:{...p._addInDraft,marketAtPurchase:e.target.value}}))}/></div>
+                    <div style={{width:90}}><label style={{fontSize:9,color:'#555'}}>Cost ($)</label><input className="input" type="number" min="0" step="0.01" style={{fontSize:11,padding:'4px 8px'}} value={d.buyPrice||''} onChange={e=>setEditTx(p=>({...p,_addInDraft:{...p._addInDraft,buyPrice:e.target.value}}))}/></div>
+                    <div style={{width:60}}><label style={{fontSize:9,color:'#555'}}>%</label><input className="input" type="number" min="0" max="200" step="0.1" style={{fontSize:11,padding:'4px 8px'}}
+                      value={pctMkt>0?pctMkt.toFixed(1):''} onChange={e=>{
+                        const pv=toF(e.target.value);
+                        if(mkt>0) setEditTx(p=>({...p,_addInDraft:{...p._addInDraft,buyPrice:String(+((pv/100)*mkt).toFixed(2))}}));
+                      }}/></div>
+                    {pctMkt>0&&<span className={`pct-pill ${pillCls(pctMkt)}`} style={{fontSize:9}}>{pct(pctMkt)}</span>}
+                  </div>
+                  <OwnershipSplit profiles={profiles} owners={d.owners||[]}
+                    onChange={owners=>setEditTx(p=>({...p,_addInDraft:{...p._addInDraft,owners}}))}
+                    defaults={getDefaultOwners()}/>
+                  <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}>
+                    <button className="btn btn-ghost" style={{fontSize:10,padding:'4px 10px'}} onClick={()=>setEditTx(p=>({...p,_addInDraft:null}))}>Cancel</button>
+                    <button className="btn btn-primary" style={{fontSize:10,padding:'4px 10px'}} onClick={()=>{
+                      if(!d.name.trim())return;
+                      setEditTx(p=>({...p,newCardsIn:[...(p.newCardsIn||[]),{name:d.name.trim(),buyPrice:toF(d.buyPrice)||toF(d.marketAtPurchase)||0,marketAtPurchase:toF(d.marketAtPurchase)||0,condition:'Near Mint',owners:d.owners||getDefaultOwners()}],_addInDraft:null}));
+                    }}>Add Card</button>
+                  </div>
+                </div>;
+              })()}
             </div>
           );})()}
           <div className="grid2" style={{marginBottom:8}}>
